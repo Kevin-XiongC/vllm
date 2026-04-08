@@ -1,0 +1,82 @@
+name: Build and Publish Docker Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      cuda_version:
+        description: 'CUDA version'
+        required: false
+        default: '12.9.1'
+      torch_cuda_arch_list:
+        description: 'CUDA architectures to compile for'
+        required: false
+        default: '9.0'
+      max_jobs:
+        description: 'Max parallel compilation jobs'
+        required: false
+        default: '128'
+      nvcc_threads:
+        description: 'NVCC parallel threads'
+        required: false
+        default: '32'
+      precompiled_wheel_commit:
+        description: 'Commit SHA for precompiled vLLM wheel'
+        required: false
+        default: ''
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  publish:
+    if: github.repository == 'novitalabs/vllm-int'
+    runs-on: self-hosted
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY }}/novitalabs/vllm
+          tags: |
+            type=raw,value={{branch}}-{{sha}}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          push: true
+          context: .
+          file: docker/Dockerfile
+          target: vllm-openai
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CUDA_VERSION=${{ inputs.cuda_version }}
+            BUILD_BASE_IMAGE=nvcr.io/nvidia/cuda:${{ inputs.cuda_version }}-devel-ubuntu22.04
+            FINAL_BASE_IMAGE=nvcr.io/nvidia/cuda:${{ inputs.cuda_version }}-base-ubuntu22.04
+            max_jobs=${{ inputs.max_jobs }}
+            nvcc_threads=${{ inputs.nvcc_threads }}
+            torch_cuda_arch_list=${{ inputs.torch_cuda_arch_list }}
+            RUN_WHEEL_CHECK=false
+            VLLM_USE_PRECOMPILED=1
+            ${{ inputs.precompiled_wheel_commit != '' && format('VLLM_MERGE_BASE_COMMIT={0}', inputs.precompiled_wheel_commit) || '' }}
+          cache-from: type=local,src=/tmp/.buildx-cache-vllm
+          cache-to: type=local,dest=/tmp/.buildx-cache-vllm,mode=max
