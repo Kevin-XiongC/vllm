@@ -138,6 +138,14 @@ class PassConfig:
     """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
+    enable_novita_allreduce_rms_fusion: bool = False
+    """Use novita's optimized allreduce+rms_norm kernel instead of
+    flashinfer's. Requires _novita_C to be built and flashinfer for
+    workspace management. Only effective when fuse_allreduce_rms is also
+    enabled."""
+    enable_rope_fp8_kvstore_fusion: bool = False
+    """Use novita's fused RoPE + FP8 cast + KV store kernel for minimax_m2.
+    Requires _novita_C to be built and the model to use FP8 KV cache."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
@@ -1103,6 +1111,10 @@ class CompilationConfig:
                         self.pass_config.fuse_rope_kvcache = False
                     self.splitting_ops.append("vllm::unified_kv_cache_update")
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
+
+                if self.pass_config.enable_rope_fp8_kvstore_fusion:
+                    self.splitting_ops.append(
+                        "vllm::novita_fused_rope_fp8_kvstore")
 
             elif len(self.splitting_ops) == 0:
                 if (
