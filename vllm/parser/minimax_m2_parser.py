@@ -9,6 +9,8 @@ MinimaxM2ToolParser into a single unified interface by delegating
 to those implementations.
 """
 
+from typing import Any
+
 from vllm.logger import init_logger
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.minimax_m2_reasoning_parser import MiniMaxM2ReasoningParser
@@ -43,11 +45,17 @@ class MiniMaxM2Parser(DelegatingParser):
     reasoning_parser_cls = MiniMaxM2ReasoningParser
     tool_parser_cls = MinimaxM2ToolParser
 
-    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[Tool] | None = None,
+        **kwargs: Any,
+    ):
         super().__init__(tokenizer)
 
-        # Initialize the underlying parsers
-        self._reasoning_parser = MiniMaxM2ReasoningParser(tokenizer)
+        # Initialize the underlying parsers (forward e.g. chat_template_kwargs
+        # from OpenAI serving, matching _WrappedParser / base Parser contract).
+        self._reasoning_parser = MiniMaxM2ReasoningParser(tokenizer, **kwargs)
         self._tool_parser = MinimaxM2ToolParser(tokenizer, tools)
 
         logger.debug(
