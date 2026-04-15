@@ -107,7 +107,8 @@ __global__ void __launch_bounds__(128, 16) fusedQKNormRopeFP8KVStoreKernel(
     __nv_fp8_e4m3* v_cache,
     int64_t const* __restrict__ slot_mapping,  // INT64 for vLLM compatibility
     float const* __restrict__ k_scale_ptr, float const* __restrict__ v_scale_ptr,
-    int64_t const kv_cache_stride) {
+    int64_t const block_size, int64_t const block_stride,
+    int64_t const page_stride, int64_t const head_stride) {
   int const warpsPerBlock = blockDim.x / 32;
   int const warpId = threadIdx.x / 32;
   int const laneId = threadIdx.x % 32;
@@ -175,8 +176,11 @@ __global__ void __launch_bounds__(128, 16) fusedQKNormRopeFP8KVStoreKernel(
     int64_t const cacheSlot = slot_mapping[tokenIdx];
     if (cacheSlot < 0) return;
 
-    int64_t const cacheOffset = cacheSlot * kv_cache_stride +
-                                static_cast<int64_t>(headIdx) * head_dim +
+    int64_t const blk_idx = cacheSlot / block_size;
+    int64_t const blk_off = cacheSlot % block_size;
+    int64_t const cacheOffset = blk_idx * block_stride +
+                                blk_off * page_stride +
+                                static_cast<int64_t>(headIdx) * head_stride +
                                 laneId * numElemsPerThread;
 
     uint32_t packed = 0;
@@ -231,10 +235,13 @@ __global__ void __launch_bounds__(128, 16) fusedQKNormRopeFP8KVStoreKernel(
     int64_t const cacheSlot = slot_mapping[tokenIdx];
     if (cacheSlot < 0) return;
 
+    int64_t const blk_idx = cacheSlot / block_size;
+    int64_t const blk_off = cacheSlot % block_size;
     scale_ptr = k_scale_ptr;
     out_ptr = k_cache;
-    out_offset = cacheSlot * kv_cache_stride +
-                 static_cast<int64_t>(headIdx) * head_dim +
+    out_offset = blk_idx * block_stride +
+                 blk_off * page_stride +
+                 static_cast<int64_t>(headIdx) * head_stride +
                  laneId * numElemsPerThread;
   }
 
@@ -322,7 +329,8 @@ __global__ void __launch_bounds__(128, 16) fusedRopeFP8KVStoreKernel(
     __nv_fp8_e4m3* v_cache,
     int64_t const* __restrict__ slot_mapping,  // INT64 for vLLM compatibility
     float const* __restrict__ k_scale_ptr, float const* __restrict__ v_scale_ptr,
-    int64_t const kv_cache_stride) {
+    int64_t const block_size, int64_t const block_stride,
+    int64_t const page_stride, int64_t const head_stride) {
   int const warpsPerBlock = blockDim.x / 32;
   int const warpId = threadIdx.x / 32;
   int const laneId = threadIdx.x % 32;
@@ -393,8 +401,11 @@ __global__ void __launch_bounds__(128, 16) fusedRopeFP8KVStoreKernel(
     int64_t const cacheSlot = slot_mapping[tokenIdx];
     if (cacheSlot < 0) return;
 
-    int64_t const cacheOffset = cacheSlot * kv_cache_stride +
-                                static_cast<int64_t>(headIdx) * head_dim +
+    int64_t const blk_idx = cacheSlot / block_size;
+    int64_t const blk_off = cacheSlot % block_size;
+    int64_t const cacheOffset = blk_idx * block_stride +
+                                blk_off * page_stride +
+                                static_cast<int64_t>(headIdx) * head_stride +
                                 laneId * numElemsPerThread;
 
     uint32_t packed = 0;
@@ -425,10 +436,13 @@ __global__ void __launch_bounds__(128, 16) fusedRopeFP8KVStoreKernel(
     int64_t const cacheSlot = slot_mapping[tokenIdx];
     if (cacheSlot < 0) return;
 
+    int64_t const blk_idx = cacheSlot / block_size;
+    int64_t const blk_off = cacheSlot % block_size;
     scale_ptr = k_scale_ptr;
     out_ptr = k_cache;
-    out_offset = cacheSlot * kv_cache_stride +
-                 static_cast<int64_t>(headIdx) * head_dim +
+    out_offset = blk_idx * block_stride +
+                 blk_off * page_stride +
+                 static_cast<int64_t>(headIdx) * head_stride +
                  laneId * numElemsPerThread;
   }
 
@@ -521,7 +535,9 @@ static void launchFusedQKNormRopeFP8KVStore(
     __nv_bfloat16 const* cos_sin_cache, void* q_output, float const* q_scale,
     int64_t const q_output_stride, void* k_cache, void* v_cache,
     int64_t const* slot_mapping, float const* k_scale, float const* v_scale,
-    int64_t const kv_cache_stride, cudaStream_t stream) {
+    int64_t const block_size_kv, int64_t const block_stride,
+    int64_t const page_stride, int64_t const head_stride,
+    cudaStream_t stream) {
   constexpr int blockSize = 128;
   int const warpsPerBlock = blockSize / 32;
   int const totalWarps = num_tokens * (num_heads_q + num_heads_k + num_heads_v);
@@ -539,7 +555,7 @@ static void launchFusedQKNormRopeFP8KVStore(
             reinterpret_cast<__nv_fp8_e4m3*>(q_output), q_scale, q_output_stride,  \
             reinterpret_cast<__nv_fp8_e4m3*>(k_cache),                              \
             reinterpret_cast<__nv_fp8_e4m3*>(v_cache), slot_mapping, k_scale,       \
-            v_scale, kv_cache_stride);                                               \
+            v_scale, block_size_kv, block_stride, page_stride, head_stride);        \
   });
 
   switch (head_dim) {
@@ -569,7 +585,9 @@ static void launchFusedRopeFP8KVStore(
     int const rotary_dim, __nv_bfloat16 const* cos_sin_cache, void* q_output,
     float const* q_scale, int64_t const q_output_stride, void* k_cache,
     void* v_cache, int64_t const* slot_mapping, float const* k_scale,
-    float const* v_scale, int64_t const kv_cache_stride, cudaStream_t stream) {
+    float const* v_scale, int64_t const block_size_kv, int64_t const block_stride,
+    int64_t const page_stride, int64_t const head_stride,
+    cudaStream_t stream) {
   constexpr int blockSize = 128;
   int const warpsPerBlock = blockSize / 32;
   int const totalWarps = num_tokens * (num_heads_q + num_heads_k + num_heads_v);
@@ -586,7 +604,7 @@ static void launchFusedRopeFP8KVStore(
             reinterpret_cast<__nv_fp8_e4m3*>(q_output), q_scale, q_output_stride,    \
             reinterpret_cast<__nv_fp8_e4m3*>(k_cache),                                \
             reinterpret_cast<__nv_fp8_e4m3*>(v_cache), slot_mapping, k_scale, v_scale, \
-            kv_cache_stride);                                                           \
+            block_size_kv, block_stride, page_stride, head_stride);                    \
   });
 
   switch (head_dim) {
@@ -627,9 +645,7 @@ void fused_qk_norm_rope_fp8_kvstore(
   NOVITA_CHECK_TH_CUDA(q_output);
   NOVITA_CHECK_CONTIGUOUS(q_output);
   NOVITA_CHECK_TH_CUDA(k_cache);
-  NOVITA_CHECK_CONTIGUOUS(k_cache);
   NOVITA_CHECK_TH_CUDA(v_cache);
-  NOVITA_CHECK_CONTIGUOUS(v_cache);
   TORCH_CHECK(q_scale.numel() == 1, "q_scale must be a single-element tensor");
   TORCH_CHECK(k_scale.numel() == 1, "k_scale must be a single-element tensor");
   TORCH_CHECK(v_scale.numel() == 1, "v_scale must be a single-element tensor");
@@ -639,7 +655,12 @@ void fused_qk_norm_rope_fp8_kvstore(
 
   int64_t num_tokens = qkv.size(0);
   int64_t q_output_stride = num_heads_q * head_dim;
-  int64_t kv_cache_stride = num_heads_k * head_dim;
+  // Extract KV cache strides for layout-agnostic addressing (NHD or HND).
+  // k_cache logical shape: [num_blocks, block_size, num_kv_heads, head_dim]
+  int64_t block_size_kv = k_cache.size(1);
+  int64_t block_stride = k_cache.stride(0);
+  int64_t page_stride = k_cache.stride(1);
+  int64_t head_stride_kv = k_cache.stride(2);
   auto stream = at::cuda::getCurrentCUDAStream(qkv.get_device());
 
   launchFusedQKNormRopeFP8KVStore(
@@ -655,7 +676,8 @@ void fused_qk_norm_rope_fp8_kvstore(
       k_cache.data_ptr(), v_cache.data_ptr(),
       reinterpret_cast<int64_t const*>(slot_mapping.data_ptr()),
       reinterpret_cast<float const*>(k_scale.data_ptr()),
-      reinterpret_cast<float const*>(v_scale.data_ptr()), kv_cache_stride,
+      reinterpret_cast<float const*>(v_scale.data_ptr()),
+      block_size_kv, block_stride, page_stride, head_stride_kv,
       stream);
 }
 
@@ -679,9 +701,7 @@ void fused_rope_fp8_kvstore(
   NOVITA_CHECK_TH_CUDA(q_output);
   NOVITA_CHECK_CONTIGUOUS(q_output);
   NOVITA_CHECK_TH_CUDA(k_cache);
-  NOVITA_CHECK_CONTIGUOUS(k_cache);
   NOVITA_CHECK_TH_CUDA(v_cache);
-  NOVITA_CHECK_CONTIGUOUS(v_cache);
   TORCH_CHECK(q_scale.numel() == 1, "q_scale must be a single-element tensor");
   TORCH_CHECK(k_scale.numel() == 1, "k_scale must be a single-element tensor");
   TORCH_CHECK(v_scale.numel() == 1, "v_scale must be a single-element tensor");
@@ -695,32 +715,25 @@ void fused_rope_fp8_kvstore(
   TORCH_CHECK(k.dim() == 2, "k must be 2D [num_tokens, num_heads_k*head_dim]");
   TORCH_CHECK(v.dim() == 2, "v must be 2D [num_tokens, num_heads_v*head_dim]");
 
-  // head_dim is inferred from q_output stride (num_heads_q * head_dim) and
-  // k/v shapes, but we require the caller to pass consistent tensors.
-  // head_dim is determined from k's last dim / num_heads_k; we use
-  // k_cache's last dim as ground truth.
   int64_t kv_heads_times_dim = k.size(1);
   int64_t q_heads_times_dim = q.size(1);
   int64_t v_heads_times_dim = v.size(1);
 
-  // vLLM kv_cache layout (FA3 NHD): [num_blocks, block_size, num_kv_heads, head_dim]
-  // slot = block_idx * block_size + block_offset
-  // kv_cache_stride = num_kv_heads * head_dim  (stride between consecutive slots)
-  //
-  // k.size(1) = num_kv_heads * head_dim, so kv_heads_times_dim gives the
-  // correct per-slot stride directly, matching the glm4_moe kernel convention.
   int64_t q_output_stride = q_heads_times_dim;
 
-  // head_dim: must be consistent between q and k
   TORCH_CHECK(kv_heads_times_dim == v_heads_times_dim,
               "k and v must have same last dimension");
 
-  // head_dim from k_cache's last dimension [num_blocks, block_size, num_kv_heads, head_dim]
+  // k_cache logical shape: [num_blocks, block_size, num_kv_heads, head_dim]
+  // Strides encode the physical layout (NHD or HND).
   int64_t head_dim = k_cache.size(-1);
-  // kv_cache_stride: stride between slots = num_kv_heads * head_dim
-  int64_t kv_cache_stride = kv_heads_times_dim;
   TORCH_CHECK(head_dim == 64 || head_dim == 128 || head_dim == 256,
               "head_dim must be 64, 128, or 256; got ", head_dim);
+
+  int64_t block_size_kv = k_cache.size(1);
+  int64_t block_stride = k_cache.stride(0);
+  int64_t page_stride = k_cache.stride(1);
+  int64_t head_stride_kv = k_cache.stride(2);
 
   int64_t num_heads_q = q_heads_times_dim / head_dim;
   int64_t num_heads_k = kv_heads_times_dim / head_dim;
@@ -741,5 +754,6 @@ void fused_rope_fp8_kvstore(
       reinterpret_cast<int64_t const*>(slot_mapping.data_ptr()),
       reinterpret_cast<float const*>(k_scale.data_ptr()),
       reinterpret_cast<float const*>(v_scale.data_ptr()),
-      kv_cache_stride, stream);
+      block_size_kv, block_stride, page_stride, head_stride_kv,
+      stream);
 }
