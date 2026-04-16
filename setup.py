@@ -682,6 +682,7 @@ class precompiled_wheel_utils:
                     "vllm/_moe_C.abi3.so",
                     "vllm/_flashmla_C.abi3.so",
                     "vllm/_flashmla_extension_C.abi3.so",
+                    "vllm/_novita_C.abi3.so",
                     "vllm/_sparse_flashmla_C.abi3.so",
                     "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                     "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
@@ -1012,6 +1013,10 @@ if _is_cuda():
         # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
         # Optional since it won't build on unsupported architectures
         ext_modules.append(CMakeExtension(name="vllm._deep_gemm_C", optional=True))
+    if envs.VLLM_USE_PRECOMPILED or CUDA_HOME:
+        # Novita fused kernels target sm_90 (H200) only.
+        # Optional since it won't build on unsupported architectures.
+        ext_modules.append(CMakeExtension(name="vllm._novita_C", optional=True))
 
 if _is_cpu():
     import platform

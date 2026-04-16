@@ -272,6 +272,97 @@ vllm serve <model> \
 - **Replay**: the full graph replays all GPU work with zero Python overhead. The
   splitting op's Python code does NOT run during replay.
 
+## Piecewise CUDAGraph Memory Pitfall
+
+When a custom op is registered as a **splitting op**, it runs in eager mode
+between two piecewise CUDAGraph subgraphs. This creates a critical memory
+constraint:
+
+### The Problem
+
+```
+┌─ CUDAGraph #1 ─┐   splitting op   ┌─ CUDAGraph #2 ─┐
+│  compiled code  │ → (eager mode) → │  compiled code  │
+│  inductor 管理  │                  │  inductor 管理  │
+│  地址确定性 ✓   │                  │  地址确定性 ✓   │
+└─────────────────┘                  └─────────────────┘
+                    ↑
+                 "no man's land":
+                 not in any graph pool
+                 not managed by inductor
+```
+
+Tensors allocated with `torch.empty` inside a splitting op use the regular
+PyTorch CUDA caching allocator, which does **NOT** guarantee address stability
+across calls. If such a tensor is passed to the next CUDAGraph subgraph:
+
+1. **Capture**: CUDAGraph #2 records the tensor address `A` from capture time
+2. **Replay**: splitting op allocates at a different address `B`
+3. **CUDAGraph #2 replay**: reads from stale address `A` → IMA or garbage
+
+This does **NOT** happen with FULL CUDAGraph mode, because `torch.empty` inside
+a `torch.cuda.CUDAGraph()` capture uses the graph's private memory pool, which
+is deterministic.
+
+### Memory Allocation Rules for Splitting Ops
+
+| Allocation location | Memory manager | Address stability |
+|---------------------|---------------|-------------------|
+| Inside CUDAGraph subgraph | inductor memory planner | ✅ deterministic |
+| Inside FULL CUDAGraph | graph private pool | ✅ deterministic |
+| Inside splitting op (eager) | caching allocator | ❌ non-deterministic |
+
+### Rules
+
+1. **Never `torch.empty`/`torch.zeros` inside a splitting op for tensors
+   consumed by the next subgraph.** Use persistent buffers instead:
+
+```python
+# ❌ BROKEN: address changes between calls
+def my_splitting_op(...):
+    output = torch.empty(n, d)   # caching allocator
+    kernel(input, output)
+    return output                 # passed to CUDAGraph #2 → IMA
+
+# ✅ SAFE: persistent buffer, address never changes
+self._buf = torch.empty(max_n, d)  # allocated once in __init__
+def my_splitting_op(...):
+    output = self._buf[:n]         # slice preserves data_ptr
+    kernel(input, output)
+    return output
+```
+
+2. **Tensors flowing INTO a splitting op (from the previous subgraph) are
+   safe** — their addresses are managed by inductor/graph pool.
+
+3. **Prefer not using splitting ops at all.** If the low-level CUDA kernel
+   has a `fake_impl`, it can be included inside a compiled subgraph (traced
+   by torch.compile). This avoids the "no man's land" entirely:
+
+```
+─── CUDAGraph subgraph ─────────────────────────────────
+│  qkv_proj → qk_norm                                  │
+│  torch.ops._novita_C.fused_kernel(...)  ← compiled!  │
+│  (inductor manages all intermediates)                 │
+────────────────────────────────────────────────────────
+           ↓ (split only at attention — standard vLLM)
+  unified_attention_with_output(...)     ← eager (safe)
+           ↓
+─── CUDAGraph subgraph ─────────────────────────────────
+│  o_proj → MoE → residual                             │
+────────────────────────────────────────────────────────
+```
+
+### Checklist for Splitting Ops
+
+- [ ] Does the op allocate tensors with `torch.empty`/`torch.zeros`?
+- [ ] Are those tensors consumed by the **next** CUDAGraph subgraph?
+- [ ] If yes → **must** use persistent buffers (or class-level shared buffers)
+- [ ] Does the op have data-dependent branches (`if tensor.numel() == 0`)?
+- [ ] If yes → cannot be traced by dynamo, must remain a splitting op
+- [ ] If no → consider removing from `splitting_ops` and letting torch.compile
+      trace through it
+
 ## KV Cache Layout
 
 vLLM FlashAttention (FA3) uses NHD layout:

@@ -340,7 +340,6 @@ def novita_fused_rope_fp8_kvstore(
         unified_kv_cache_update,
     )
 
-    num_tokens = q.shape[0]
     num_heads_v = num_heads_k
     _, _, kv_cache, slot_mapping = get_attention_context(layer_name)
 
@@ -372,6 +371,7 @@ def novita_fused_rope_fp8_kvstore(
         )
         _logged_fused_rope_layers.add(layer_name)
 
+    num_tokens = q.shape[0]
     q_output = torch.empty(
         num_tokens, q_size, dtype=torch.float8_e4m3fn, device=q.device
     )

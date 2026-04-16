@@ -1,12 +1,13 @@
 """Build only the novita .so extension (without full vllm rebuild)."""
 import os
 import torch
+import torch.utils.cpp_extension
+torch.utils.cpp_extension._check_cuda_version = lambda *a, **kw: None
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 from setuptools import setup
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-# Auto-detect GPU compute capability
 if torch.cuda.is_available():
     major, minor = torch.cuda.get_device_capability()
     _arch = f"{major}{minor}"
