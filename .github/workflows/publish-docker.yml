@@ -23,6 +23,10 @@ on:
         description: 'Commit SHA for precompiled vLLM wheel'
         required: false
         default: ''
+      target:
+        description: 'Dockerfile target stage to build'
+        required: false
+        default: 'vllm-openai'
 
 env:
   REGISTRY: ghcr.io
@@ -65,7 +69,7 @@ jobs:
           push: true
           context: .
           file: docker/Dockerfile
-          target: vllm-openai
+          target: ${{ inputs.target }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
