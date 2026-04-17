@@ -30,7 +30,7 @@ env:
 jobs:
   publish:
     if: github.repository == 'novitalabs/vllm-int'
-    runs-on: self-hosted
+    runs-on: [self-hosted, cpu]
     permissions:
       contents: read
       packages: write
