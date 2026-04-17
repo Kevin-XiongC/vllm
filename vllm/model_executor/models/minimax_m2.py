@@ -239,6 +239,33 @@ class MiniMaxM2Attention(nn.Module):
                 "novita_kernels (_novita_C) not available but "
                 "enable_rope_fp8_kvstore_fusion is set"
             )
+            self._init_fused_buffers(_vllm_config)
+
+    # Class-level shared buffers — allocated once, reused by all layers.
+    _fused_output_buf: torch.Tensor | None = None
+    _fused_q_output_buf: torch.Tensor | None = None
+
+    @classmethod
+    def _init_fused_buffers(cls, vllm_config: "VllmConfig") -> None:
+        if cls._fused_output_buf is not None:
+            return
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        tp_size = get_tensor_model_parallel_world_size()
+        num_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config)
+        num_kv_heads = vllm_config.model_config.get_num_kv_heads(
+            vllm_config.parallel_config)
+        head_dim = getattr(
+            vllm_config.model_config.hf_config, "head_dim",
+            vllm_config.model_config.hf_config.hidden_size
+            // vllm_config.model_config.hf_config.num_attention_heads)
+        q_size = num_heads * head_dim
+        cls._fused_output_buf = torch.empty(
+            max_num_tokens, q_size, dtype=torch.bfloat16, device=device)
+        cls._fused_q_output_buf = torch.empty(
+            max_num_tokens, q_size,
+            dtype=torch.float8_e4m3fn, device=device)
 
     def _forward_fused(
         self,
@@ -251,21 +278,17 @@ class MiniMaxM2Attention(nn.Module):
 
         The custom op is opaque to torch.compile / dynamo and registered
         as a splitting op, so CUDA graphs and piecewise compilation remain
-        fully functional. Matches the pattern used by glm4_moe's
-        novita_fused_attn op.
+        fully functional.  ``output`` and ``q_output`` use class-level
+        persistent buffers shared across all layers so their addresses are
+        stable across piecewise CUDA-graph replays.
         """
         num_tokens = q.shape[0]
+        output = MiniMaxM2Attention._fused_output_buf[:num_tokens]
+        q_output = MiniMaxM2Attention._fused_q_output_buf[:num_tokens]
 
         cos_sin_cache = self.rotary_emb.cos_sin_cache
         if cos_sin_cache.dtype != torch.bfloat16:
             cos_sin_cache = cos_sin_cache.to(torch.bfloat16)
-
-        output = torch.empty(
-            num_tokens,
-            self.num_heads * self.head_dim,
-            dtype=q.dtype,
-            device=q.device,
-        )
 
         torch.ops.vllm.novita_fused_rope_fp8_kvstore(
             q.contiguous(),
@@ -277,6 +300,7 @@ class MiniMaxM2Attention(nn.Module):
             self.attn._k_scale,
             self.attn._v_scale,
             output,
+            q_output,
             self.attn.layer_name,
             self.num_heads,
             self.num_kv_heads,

@@ -53,7 +53,7 @@ def register_novita_ops() -> None:
     direct_register_custom_op(
         op_name="novita_fused_rope_fp8_kvstore",
         op_func=novita_fused_rope_fp8_kvstore,
-        mutates_args=["output"],
+        mutates_args=["output", "q_output"],
         fake_impl=novita_fused_rope_fp8_kvstore_fake,
     )
 
@@ -319,6 +319,7 @@ def novita_fused_rope_fp8_kvstore(
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
     output: torch.Tensor,
+    q_output: torch.Tensor,
     layer_name: str,
     num_heads_q: int,
     num_heads_k: int,
@@ -333,6 +334,11 @@ def novita_fused_rope_fp8_kvstore(
     During memory profiling (kv_cache empty), falls back to unfused ops.
     During normal inference, runs the novita fused CUDA kernel then calls
     unified_attention_with_output.
+
+    Both ``output`` (bf16 attention result) and ``q_output`` (fp8 Q after
+    RoPE) must be pre-allocated by the caller so that their addresses are
+    stable across CUDA-graph replays, avoiding D2D copies at compiled-graph
+    boundaries.
     """
     from vllm.model_executor.layers.attention.attention import (
         get_attention_context,
@@ -371,11 +377,13 @@ def novita_fused_rope_fp8_kvstore(
         )
         _logged_fused_rope_layers.add(layer_name)
 
-    num_tokens = q.shape[0]
-    q_output = torch.empty(
-        num_tokens, q_size, dtype=torch.float8_e4m3fn, device=q.device
-    )
-
+    # The fused kernel only writes the first slot_mapping.shape[0] rows of
+    # q_output (one row per actual token).  However, we must pass the
+    # full padded q_output to unified_attention_with_output so that
+    # FlashAttention can slice it with its own num_actual_tokens — matching
+    # the standard (non-fused) attention path.  Pre-slicing here would
+    # create a tensor smaller than what the TMA descriptor expects in
+    # CUDA-graph replay, causing a TMA out-of-bounds error.
     torch.ops._novita_C.fused_rope_fp8_kvstore(
         q,
         k,
@@ -409,6 +417,7 @@ def novita_fused_rope_fp8_kvstore_fake(
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
     output: torch.Tensor,
+    q_output: torch.Tensor,
     layer_name: str,
     num_heads_q: int,
     num_heads_k: int,
