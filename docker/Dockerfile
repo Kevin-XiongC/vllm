@@ -733,7 +733,9 @@ RUN --mount=type=secret,id=gh_token \
     fi && \
     uv pip install --system \
         "https://${GH_TOKEN}@github.com/${SGL_KERNEL_RELEASE_REPO}/releases/download/${SGL_KERNEL_RELEASE_TAG}/${SGL_KERNEL_WHL_NAME}"
-    uv pip install pegaflow-llm 
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system pegaflow-llm
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
