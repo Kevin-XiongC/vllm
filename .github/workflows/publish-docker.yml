@@ -78,7 +78,5 @@ jobs:
             RUN_WHEEL_CHECK=false
             VLLM_USE_PRECOMPILED=1
             ${{ inputs.precompiled_wheel_commit != '' && format('VLLM_MERGE_BASE_COMMIT={0}', inputs.precompiled_wheel_commit) || '' }}
-          secrets: |
-            gh_token=${{ secrets.NOVITA_GH_TOKEN }}
           cache-from: type=local,src=/tmp/.buildx-cache-vllm
           cache-to: type=local,dest=/tmp/.buildx-cache-vllm,mode=max

@@ -706,33 +706,19 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# Install sgl-kernel from private GitHub release.
-# Token passed via BuildKit secret -- never stored in any image layer.
-# GitHub Actions usage:
-#   - Store a PAT with read access to novitalabs/vllm-int as a repo secret
-#     (e.g. NOVITA_GH_TOKEN). GITHUB_TOKEN only covers the current repo.
-#   - In the workflow step:
-#       env:
-#         GH_TOKEN: ${{ secrets.NOVITA_GH_TOKEN }}
-#       run: |
-#         docker buildx build --secret id=gh_token,env=GH_TOKEN ...
-ARG SGL_KERNEL_RELEASE_REPO="novitalabs/vllm-int"
+# Install sgl-kernel from public GitHub release (novitalabs/sglang).
+# Only installed for CUDA 12.9 builds.
+ARG SGL_KERNEL_RELEASE_REPO="novitalabs/sglang"
 ARG SGL_KERNEL_RELEASE_TAG="0.4.1"
 ARG SGL_KERNEL_WHL_NAME="sglang_kernel-0.4.1-cp310-abi3-linux_x86_64.whl"
-RUN --mount=type=secret,id=gh_token \
-    --mount=type=cache,target=/root/.cache/uv \
-    GH_TOKEN=$(cat /run/secrets/gh_token 2>/dev/null) && \
-    if [ -z "$GH_TOKEN" ]; then \
-        echo "WARNING: gh_token secret not provided, skipping sgl-kernel install"; \
-        exit 0; \
-    fi && \
+RUN --mount=type=cache,target=/root/.cache/uv \
     CUDA_VERSION_SHORT=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     if [ "$CUDA_VERSION_SHORT" != "129" ]; then \
         echo "Skipping sgl-kernel: only installed for CUDA 12.9 (got ${CUDA_VERSION})"; \
         exit 0; \
     fi && \
     uv pip install --system \
-        "https://${GH_TOKEN}@github.com/${SGL_KERNEL_RELEASE_REPO}/releases/download/${SGL_KERNEL_RELEASE_TAG}/${SGL_KERNEL_WHL_NAME}"
+        "https://github.com/${SGL_KERNEL_RELEASE_REPO}/releases/download/${SGL_KERNEL_RELEASE_TAG}/${SGL_KERNEL_WHL_NAME}"
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system pegaflow-llm
