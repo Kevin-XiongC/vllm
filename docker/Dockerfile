@@ -324,13 +324,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         python3 build_novita.py build_ext --inplace && \
         NOVITA_SO=$(find vllm -name "_novita_C*.so" | head -1) && \
         if [ -n "$NOVITA_SO" ]; then \
-            python3 -c "
-import zipfile, sys
-whl, so = sys.argv[1], sys.argv[2]
-with zipfile.ZipFile(whl, 'a') as z:
-    z.write(so, 'vllm/_novita_C.abi3.so')
-    print(f'Injected {so} into {whl} as vllm/_novita_C.abi3.so')
-" "$WHL" "$NOVITA_SO"; \
+            python3 -c "import zipfile,sys; whl,so=sys.argv[1],sys.argv[2]; z=zipfile.ZipFile(whl,'a'); z.write(so,'vllm/_novita_C.abi3.so'); z.close(); print('Injected '+so+' into '+whl)" "$WHL" "$NOVITA_SO"; \
         else \
             echo "WARNING: novita .so not found after build_novita.py"; \
         fi \
