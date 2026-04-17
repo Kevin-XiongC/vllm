@@ -120,8 +120,9 @@ class RMSNorm(CustomOp):
         var_hidden_size: int | None = None,
         has_weight: bool = True,
         dtype: torch.dtype | None = None,
+        enforce_enable: bool = False,
     ) -> None:
-        super().__init__()
+        super().__init__(enforce_enable=enforce_enable)
 
         self.hidden_size = hidden_size
         self.variance_epsilon = eps

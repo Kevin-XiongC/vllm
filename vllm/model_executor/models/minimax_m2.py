@@ -374,7 +374,11 @@ class MiniMaxM2DecoderLayer(nn.Module):
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
+            config.hidden_size,
+            eps=config.rms_norm_eps,
+            # Keep this op on the CUDA custom-kernel path so it does not
+            # decompose into an Inductor Triton reduction.
+            enforce_enable=True,
         )
 
     def forward(
