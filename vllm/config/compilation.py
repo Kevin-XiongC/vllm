@@ -1113,8 +1113,7 @@ class CompilationConfig:
                     self.splitting_ops.append("vllm::unified_mla_kv_cache_update")
 
                 if self.pass_config.enable_rope_fp8_kvstore_fusion:
-                    self.splitting_ops.append(
-                        "vllm::novita_fused_rope_fp8_kvstore")
+                    self.splitting_ops.append("vllm::novita_fused_rope_fp8_kvstore")
 
             elif len(self.splitting_ops) == 0:
                 if (

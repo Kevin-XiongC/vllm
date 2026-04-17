@@ -332,10 +332,10 @@ def my_splitting_op(...):
     return output
 ```
 
-2. **Tensors flowing INTO a splitting op (from the previous subgraph) are
+1. **Tensors flowing INTO a splitting op (from the previous subgraph) are
    safe** — their addresses are managed by inductor/graph pool.
 
-3. **Prefer not using splitting ops at all.** If the low-level CUDA kernel
+2. **Prefer not using splitting ops at all.** If the low-level CUDA kernel
    has a `fake_impl`, it can be included inside a compiled subgraph (traced
    by torch.compile). This avoids the "no man's land" entirely:
 

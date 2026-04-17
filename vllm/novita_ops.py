@@ -58,7 +58,6 @@ def register_novita_ops() -> None:
     )
 
 
-
 # ---------------------------------------------------------------------------
 # Custom op: novita_fused_allreduce_norm
 #
@@ -172,15 +171,13 @@ def call_novita_fused_allreduce_norm(
     current_tensor_size = num_tokens * hidden_size * element_size
 
     curr_device = current_platform.get_device_capability()
-    device_capability = (
-        curr_device.to_int() if curr_device is not None else None
-    )
+    device_capability = curr_device.to_int() if curr_device is not None else None
     max_one_shot_size = _NOVITA_ONE_SHOT_MAX_SIZES_MB.get(
-        device_capability, {}  # type: ignore[arg-type]
+        device_capability,
+        {},  # type: ignore[arg-type]
     ).get(world_size, None)
     use_oneshot = (
-        max_one_shot_size is None
-        or current_tensor_size <= max_one_shot_size * MiB
+        max_one_shot_size is None or current_tensor_size <= max_one_shot_size * MiB
     )
 
     rank = get_tensor_model_parallel_rank()
@@ -351,8 +348,7 @@ def novita_fused_rope_fp8_kvstore(
 
     if kv_cache.numel() == 0 or slot_mapping is None:
         # ---- Profiling fallback: unfused ops ----
-        torch.ops._C.rotary_embedding(positions, q, k, head_dim,
-                                      cos_sin_cache, True)
+        torch.ops._C.rotary_embedding(positions, q, k, head_dim, cos_sin_cache, True)
 
         q_3d = q.view(-1, num_heads_q, head_dim)
         k_3d = k.view(-1, num_heads_k, head_dim)
@@ -361,7 +357,11 @@ def novita_fused_rope_fp8_kvstore(
 
         kv_dep = unified_kv_cache_update(k_3d, v_3d, layer_name)
         unified_attention_with_output(
-            q_3d, k_3d, v_3d, output_view, layer_name,
+            q_3d,
+            k_3d,
+            v_3d,
+            output_view,
+            layer_name,
             kv_cache_dummy_dep=kv_dep,
         )
         return
@@ -403,8 +403,7 @@ def novita_fused_rope_fp8_kvstore(
 
     q_view = q_output.view(-1, num_heads_q, head_dim)
     output_view = output.view(-1, num_heads_q, head_dim)
-    unified_attention_with_output(q_view, q_view, q_view, output_view,
-                                 layer_name)
+    unified_attention_with_output(q_view, q_view, q_view, output_view, layer_name)
 
 
 def novita_fused_rope_fp8_kvstore_fake(
@@ -427,7 +426,6 @@ def novita_fused_rope_fp8_kvstore_fake(
     rotary_dim: int,
 ) -> None:
     return
-
 
 
 if _novita_available:

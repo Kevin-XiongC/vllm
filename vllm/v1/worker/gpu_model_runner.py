@@ -3696,7 +3696,6 @@ class GPUModelRunner(
                 pyt_hooks.register_hooks(self.model, self.model.__class__.__name__)
                 self.layerwise_nvtx_hooks_registered = True
 
-
     def _get_slot_mappings(
         self,
         num_tokens_padded: int,

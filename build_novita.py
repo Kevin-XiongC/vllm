@@ -1,15 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Build only the novita .so extension (without full vllm rebuild).
 
 Target architectures are resolved the same way as vllm's cmake build:
   1. TORCH_CUDA_ARCH_LIST env var (e.g. "8.0 8.9 9.0")
   2. Fall back to torch's default arch list for the installed torch version
 """
+
 import os
+
 import torch
 import torch.utils.cpp_extension
+
 torch.utils.cpp_extension._check_cuda_version = lambda *a, **kw: None
-from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 from setuptools import setup
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 

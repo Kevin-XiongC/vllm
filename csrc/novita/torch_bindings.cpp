@@ -5,14 +5,16 @@
 
 #include "core/registration.h"
 
-// Fused RoPE + FP8 quantization + KV cache store (minimax_m2; q/k normed upstream)
-void fused_rope_fp8_kvstore(
-    torch::Tensor& q, torch::Tensor& k, torch::Tensor& v, bool is_neox,
-    torch::Tensor& position_ids, int64_t rotary_dim,
-    torch::Tensor& cos_sin_cache, torch::Tensor& q_output,
-    torch::Tensor& q_scale, torch::Tensor& k_cache, torch::Tensor& v_cache,
-    torch::Tensor& slot_mapping, torch::Tensor& k_scale,
-    torch::Tensor& v_scale);
+// Fused RoPE + FP8 quantization + KV cache store (minimax_m2; q/k normed
+// upstream)
+void fused_rope_fp8_kvstore(torch::Tensor& q, torch::Tensor& k,
+                            torch::Tensor& v, bool is_neox,
+                            torch::Tensor& position_ids, int64_t rotary_dim,
+                            torch::Tensor& cos_sin_cache,
+                            torch::Tensor& q_output, torch::Tensor& q_scale,
+                            torch::Tensor& k_cache, torch::Tensor& v_cache,
+                            torch::Tensor& slot_mapping, torch::Tensor& k_scale,
+                            torch::Tensor& v_scale);
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(

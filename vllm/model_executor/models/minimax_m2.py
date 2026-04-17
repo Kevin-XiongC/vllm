@@ -253,19 +253,24 @@ class MiniMaxM2Attention(nn.Module):
         device = torch.device(f"cuda:{torch.cuda.current_device()}")
         tp_size = get_tensor_model_parallel_world_size()
         num_heads = vllm_config.model_config.get_num_attention_heads(
-            vllm_config.parallel_config)
+            vllm_config.parallel_config
+        )
         num_kv_heads = vllm_config.model_config.get_num_kv_heads(
-            vllm_config.parallel_config)
+            vllm_config.parallel_config
+        )
         head_dim = getattr(
-            vllm_config.model_config.hf_config, "head_dim",
+            vllm_config.model_config.hf_config,
+            "head_dim",
             vllm_config.model_config.hf_config.hidden_size
-            // vllm_config.model_config.hf_config.num_attention_heads)
+            // vllm_config.model_config.hf_config.num_attention_heads,
+        )
         q_size = num_heads * head_dim
         cls._fused_output_buf = torch.empty(
-            max_num_tokens, q_size, dtype=torch.bfloat16, device=device)
+            max_num_tokens, q_size, dtype=torch.bfloat16, device=device
+        )
         cls._fused_q_output_buf = torch.empty(
-            max_num_tokens, q_size,
-            dtype=torch.float8_e4m3fn, device=device)
+            max_num_tokens, q_size, dtype=torch.float8_e4m3fn, device=device
+        )
 
     def _forward_fused(
         self,

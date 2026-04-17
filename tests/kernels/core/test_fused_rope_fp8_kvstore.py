@@ -13,17 +13,24 @@ def _has_novita_kernel() -> bool:
         return False
     try:
         import vllm._novita_C  # noqa: F401
-        return (hasattr(torch.ops, "_novita_C")
-                and hasattr(torch.ops._novita_C, "fused_rope_fp8_kvstore"))
+
+        return hasattr(torch.ops, "_novita_C") and hasattr(
+            torch.ops._novita_C, "fused_rope_fp8_kvstore"
+        )
     except ImportError:
         return False
 
 
-def _make_cos_sin_cache(max_pos: int, rotary_dim: int,
-                        dtype: torch.dtype,
-                        device: torch.device) -> torch.Tensor:
-    inv_freq = 1.0 / (10000.0**(torch.arange(0, rotary_dim, 2, device=device,
-                                             dtype=torch.float32) / rotary_dim))
+def _make_cos_sin_cache(
+    max_pos: int, rotary_dim: int, dtype: torch.dtype, device: torch.device
+) -> torch.Tensor:
+    inv_freq = 1.0 / (
+        10000.0
+        ** (
+            torch.arange(0, rotary_dim, 2, device=device, dtype=torch.float32)
+            / rotary_dim
+        )
+    )
     t = torch.arange(max_pos, device=device, dtype=torch.float32)
     freqs = torch.outer(t, inv_freq)
     cos = freqs.cos()
@@ -31,8 +38,13 @@ def _make_cos_sin_cache(max_pos: int, rotary_dim: int,
     return torch.cat([cos, sin], dim=-1).to(dtype)
 
 
-def _apply_rope_ref(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
-                    rotary_dim: int, is_neox: bool) -> torch.Tensor:
+def _apply_rope_ref(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    rotary_dim: int,
+    is_neox: bool,
+) -> torch.Tensor:
     # x: [T, H, D], cos/sin: [T, rotary_dim/2]
     out = x.float().clone()
     t, h, d = out.shape
@@ -43,9 +55,9 @@ def _apply_rope_ref(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
     if is_neox:
         half = d // 2
         x1 = out[:, :, :embed].clone()
-        x2 = out[:, :, half:half + embed].clone()
+        x2 = out[:, :, half : half + embed].clone()
         out[:, :, :embed] = x1 * c - x2 * s
-        out[:, :, half:half + embed] = x2 * c + x1 * s
+        out[:, :, half : half + embed] = x2 * c + x1 * s
     else:
         for i in range(embed):
             d0, d1 = 2 * i, 2 * i + 1
@@ -89,14 +101,15 @@ def _reference_impl(
     q_rope = _apply_rope_ref(q_h, cos, sin, rotary_dim, is_neox)
     k_rope = _apply_rope_ref(k_h, cos, sin, rotary_dim, is_neox)
 
-    q_out_bytes = _to_fp8_bytes(q_rope.reshape(t, num_heads_q * head_dim),
-                                q_scale)
-    k_cache_ref = torch.zeros(num_blocks,
-                              block_size,
-                              num_heads_k,
-                              head_dim,
-                              dtype=torch.uint8,
-                              device=q.device)
+    q_out_bytes = _to_fp8_bytes(q_rope.reshape(t, num_heads_q * head_dim), q_scale)
+    k_cache_ref = torch.zeros(
+        num_blocks,
+        block_size,
+        num_heads_k,
+        head_dim,
+        dtype=torch.uint8,
+        device=q.device,
+    )
     v_cache_ref = torch.zeros_like(k_cache_ref)
 
     for i in range(t):
@@ -111,8 +124,10 @@ def _reference_impl(
     return q_out_bytes, k_cache_ref, v_cache_ref
 
 
-@pytest.mark.skipif(not _has_novita_kernel(),
-                    reason="novita fused_rope_fp8_kvstore requires CUDA + vllm._novita_C")
+@pytest.mark.skipif(
+    not _has_novita_kernel(),
+    reason="novita fused_rope_fp8_kvstore requires CUDA + vllm._novita_C",
+)
 @pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("head_dim", [64, 128])
 @torch.inference_mode()
@@ -133,23 +148,12 @@ def test_novita_fused_rope_fp8_kvstore_matches_reference(
     max_pos = 4096
     rotary_dim = head_dim
 
-    q = torch.randn(num_tokens,
-                    num_heads_q * head_dim,
-                    dtype=dtype,
-                    device=device)
-    k = torch.randn(num_tokens,
-                    num_heads_k * head_dim,
-                    dtype=dtype,
-                    device=device)
-    v = torch.randn(num_tokens,
-                    num_heads_k * head_dim,
-                    dtype=dtype,
-                    device=device)
-    positions = torch.randint(0,
-                              max_pos,
-                              (num_tokens, ),
-                              dtype=torch.long,
-                              device=device)
+    q = torch.randn(num_tokens, num_heads_q * head_dim, dtype=dtype, device=device)
+    k = torch.randn(num_tokens, num_heads_k * head_dim, dtype=dtype, device=device)
+    v = torch.randn(num_tokens, num_heads_k * head_dim, dtype=dtype, device=device)
+    positions = torch.randint(
+        0, max_pos, (num_tokens,), dtype=torch.long, device=device
+    )
     # include one masked token to validate negative slot behavior
     slot_mapping = torch.arange(num_tokens, dtype=torch.long, device=device)
     slot_mapping[-1] = -1
@@ -161,16 +165,12 @@ def test_novita_fused_rope_fp8_kvstore_matches_reference(
     v_scale = torch.tensor([1.25], dtype=torch.float32, device=device)
 
     # q_output can be larger than actual token count (CUDA graph padded case)
-    q_output = torch.zeros(num_tokens + 3,
-                           num_heads_q * head_dim,
-                           dtype=torch.uint8,
-                           device=device)
-    k_cache = torch.zeros(num_blocks,
-                          block_size,
-                          num_heads_k,
-                          head_dim,
-                          dtype=torch.uint8,
-                          device=device)
+    q_output = torch.zeros(
+        num_tokens + 3, num_heads_q * head_dim, dtype=torch.uint8, device=device
+    )
+    k_cache = torch.zeros(
+        num_blocks, block_size, num_heads_k, head_dim, dtype=torch.uint8, device=device
+    )
     v_cache = torch.zeros_like(k_cache)
 
     q_ref, k_ref, v_ref = _reference_impl(

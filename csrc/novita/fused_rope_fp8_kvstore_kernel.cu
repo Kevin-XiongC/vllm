@@ -17,7 +17,7 @@
 #include <cuda_runtime.h>
 #include <torch/all.h>
 
-#define NOVITA_CHECK_TYPE(x, st) \
+#define NOVITA_CHECK_TYPE(x, st)                                       \
   TORCH_CHECK(x.scalar_type() == st, #x " dtype is ", x.scalar_type(), \
               ", while ", st, " is expected")
 #define NOVITA_CHECK_TH_CUDA(x) \
@@ -76,8 +76,8 @@ __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val) {
 }
 
 template <int head_dim>
-__device__ __forceinline__ void load_head_neox(
-    __nv_bfloat16 const* src, float* lo, float* hi, int lane) {
+__device__ __forceinline__ void load_head_neox(__nv_bfloat16 const* src,
+                                               float* lo, float* hi, int lane) {
   using T2 = __nv_bfloat162;
   constexpr int HALF = head_dim / 2;
   constexpr int PPT = HALF / 32;
@@ -111,9 +111,11 @@ __device__ __forceinline__ void load_head_neox(
 }
 
 template <int head_dim, bool IS_FP8>
-__device__ __forceinline__ void write_cache_neox(
-    __nv_fp8_e4m3* cache, int64_t offset, float const* lo, float const* hi,
-    float scale, int lane) {
+__device__ __forceinline__ void write_cache_neox(__nv_fp8_e4m3* cache,
+                                                 int64_t offset,
+                                                 float const* lo,
+                                                 float const* hi, float scale,
+                                                 int lane) {
   constexpr int HALF = head_dim / 2;
   constexpr int PPT = HALF / 32;
 
@@ -133,9 +135,8 @@ __device__ __forceinline__ void write_cache_neox(
       fp8_hi[i] = float_to_fp8_e4m3(hi[i] / scale);
     }
     using fp8_vec_t = typename fp8_store_type<PPT>::type;
-    *reinterpret_cast<fp8_vec_t*>(&reinterpret_cast<uint8_t*>(cache)[offset +
-                                                                     thr_off]) =
-        *reinterpret_cast<fp8_vec_t const*>(fp8_lo);
+    *reinterpret_cast<fp8_vec_t*>(&reinterpret_cast<uint8_t*>(
+        cache)[offset + thr_off]) = *reinterpret_cast<fp8_vec_t const*>(fp8_lo);
     *reinterpret_cast<fp8_vec_t*>(
         &reinterpret_cast<uint8_t*>(cache)[offset + HALF + thr_off]) =
         *reinterpret_cast<fp8_vec_t const*>(fp8_hi);
@@ -143,9 +144,10 @@ __device__ __forceinline__ void write_cache_neox(
 }
 
 template <int head_dim>
-__device__ __forceinline__ void rope_neox(
-    float* lo, float* hi, __nv_bfloat16 const* cos_ptr,
-    __nv_bfloat16 const* sin_ptr, int lane, int embed_dim) {
+__device__ __forceinline__ void rope_neox(float* lo, float* hi,
+                                          __nv_bfloat16 const* cos_ptr,
+                                          __nv_bfloat16 const* sin_ptr,
+                                          int lane, int embed_dim) {
   constexpr int PPT = (head_dim / 2) / 32;
   int const base = PPT * lane;
 #pragma unroll
@@ -163,8 +165,8 @@ __device__ __forceinline__ void rope_neox(
 }
 
 template <int head_dim>
-__device__ __forceinline__ void load_head_gptj(
-    __nv_bfloat16 const* src, int thr_off, float* elems) {
+__device__ __forceinline__ void load_head_gptj(__nv_bfloat16 const* src,
+                                               int thr_off, float* elems) {
   using T2 = __nv_bfloat162;
   constexpr int EPT = head_dim / 32;
   constexpr int elemSizeBytes = EPT * sizeof(__nv_bfloat16);
@@ -182,9 +184,10 @@ __device__ __forceinline__ void load_head_gptj(
 }
 
 template <int head_dim, bool IS_FP8>
-__device__ __forceinline__ void write_fp8_gptj(
-    __nv_fp8_e4m3* dst, int64_t offset, int thr_off, float const* elems,
-    float scale) {
+__device__ __forceinline__ void write_fp8_gptj(__nv_fp8_e4m3* dst,
+                                               int64_t offset, int thr_off,
+                                               float const* elems,
+                                               float scale) {
   constexpr int EPT = head_dim / 32;
   static_assert(IS_FP8, "novita path expects fp8 outputs");
 
@@ -194,15 +197,15 @@ __device__ __forceinline__ void write_fp8_gptj(
     fp8_vals[i] = float_to_fp8_e4m3(elems[i] / scale);
   }
   using fp8_vec_t = typename fp8_store_type<EPT>::type;
-  *reinterpret_cast<fp8_vec_t*>(&reinterpret_cast<uint8_t*>(dst)[offset +
-                                                                 thr_off]) =
-      *reinterpret_cast<fp8_vec_t const*>(fp8_vals);
+  *reinterpret_cast<fp8_vec_t*>(&reinterpret_cast<uint8_t*>(
+      dst)[offset + thr_off]) = *reinterpret_cast<fp8_vec_t const*>(fp8_vals);
 }
 
 template <int head_dim>
-__device__ __forceinline__ void rope_gptj(
-    float* elems, __nv_bfloat16 const* cos_ptr, __nv_bfloat16 const* sin_ptr,
-    int lane, int rotary_dim) {
+__device__ __forceinline__ void rope_gptj(float* elems,
+                                          __nv_bfloat16 const* cos_ptr,
+                                          __nv_bfloat16 const* sin_ptr,
+                                          int lane, int rotary_dim) {
   constexpr int EPT = head_dim / 32;
   int const dim_base = lane * EPT;
   if (dim_base >= rotary_dim) return;
@@ -226,9 +229,10 @@ __device__ __forceinline__ void rope_gptj(
 }
 
 template <int head_dim>
-__device__ __forceinline__ void rope_neox_shuffle(
-    float* elems, __nv_bfloat16 const* cos_ptr,
-    __nv_bfloat16 const* sin_ptr, int lane, int embed_dim) {
+__device__ __forceinline__ void rope_neox_shuffle(float* elems,
+                                                  __nv_bfloat16 const* cos_ptr,
+                                                  __nv_bfloat16 const* sin_ptr,
+                                                  int lane, int embed_dim) {
   constexpr int EPT = head_dim / 32;
   int const dim_base = lane * EPT;
   int const rotary_dim = 2 * embed_dim;
@@ -237,8 +241,10 @@ __device__ __forceinline__ void rope_neox_shuffle(
   bool const is_hi = (dim_base >= embed_dim && dim_base < rotary_dim);
 
   int partner_lane = lane;
-  if (is_lo) partner_lane = lane + partner_offset;
-  else if (is_hi) partner_lane = lane - partner_offset;
+  if (is_lo)
+    partner_lane = lane + partner_offset;
+  else if (is_hi)
+    partner_lane = lane - partner_offset;
 
   float partner[EPT];
 #pragma unroll
@@ -275,10 +281,11 @@ __global__ void fusedRopeFP8KVStoreKernelV4(
     __nv_fp8_e4m3* q_output, float const* __restrict__ q_scale_ptr,
     int64_t const q_output_stride, __nv_fp8_e4m3* k_cache,
     __nv_fp8_e4m3* v_cache, int64_t const* __restrict__ slot_mapping,
-    float const* __restrict__ k_scale_ptr, float const* __restrict__ v_scale_ptr,
-    int64_t const num_blocks, int64_t const block_size,
-    int64_t const block_stride, int64_t const page_stride,
-    int64_t const head_stride, int64_t const max_position) {
+    float const* __restrict__ k_scale_ptr,
+    float const* __restrict__ v_scale_ptr, int64_t const num_blocks,
+    int64_t const block_size, int64_t const block_stride,
+    int64_t const page_stride, int64_t const head_stride,
+    int64_t const max_position) {
   static_assert(IS_FP8, "novita fused path writes fp8 outputs only");
   int const token_idx = blockIdx.x;
   int const kv_head = blockIdx.y;
@@ -336,28 +343,28 @@ __global__ void fusedRopeFP8KVStoreKernelV4(
       if (op == 0) {
         if (write_kv) {
           float elems[EPT];
-          novita_helpers::load_head_gptj<head_dim>(
-              v_in + kv_head * head_dim, thr_off, elems);
+          novita_helpers::load_head_gptj<head_dim>(v_in + kv_head * head_dim,
+                                                   thr_off, elems);
           novita_helpers::write_fp8_gptj<head_dim, IS_FP8>(
               v_cache, cache_head_offset, thr_off, elems, v_scale);
         }
       } else if (op == 1) {
         if (write_kv) {
           float elems[EPT];
-          novita_helpers::load_head_gptj<head_dim>(
-              k_in + kv_head * head_dim, thr_off, elems);
-          novita_helpers::rope_neox_shuffle<head_dim>(
-              elems, cos_ptr, sin_ptr, lane, embed_dim);
+          novita_helpers::load_head_gptj<head_dim>(k_in + kv_head * head_dim,
+                                                   thr_off, elems);
+          novita_helpers::rope_neox_shuffle<head_dim>(elems, cos_ptr, sin_ptr,
+                                                      lane, embed_dim);
           novita_helpers::write_fp8_gptj<head_dim, IS_FP8>(
               k_cache, cache_head_offset, thr_off, elems, k_scale);
         }
       } else {
         int const q_head = q_start + (op - 2);
         float elems[EPT];
-        novita_helpers::load_head_gptj<head_dim>(
-            q_in + q_head * head_dim, thr_off, elems);
-        novita_helpers::rope_neox_shuffle<head_dim>(
-            elems, cos_ptr, sin_ptr, lane, embed_dim);
+        novita_helpers::load_head_gptj<head_dim>(q_in + q_head * head_dim,
+                                                 thr_off, elems);
+        novita_helpers::rope_neox_shuffle<head_dim>(elems, cos_ptr, sin_ptr,
+                                                    lane, embed_dim);
 
         int64_t const q_offset =
             static_cast<int64_t>(token_idx) * q_output_stride +
@@ -376,28 +383,28 @@ __global__ void fusedRopeFP8KVStoreKernelV4(
       if (op == 0) {
         if (write_kv) {
           float elems[EPT];
-          novita_helpers::load_head_gptj<head_dim>(
-              v_in + kv_head * head_dim, thr_off, elems);
+          novita_helpers::load_head_gptj<head_dim>(v_in + kv_head * head_dim,
+                                                   thr_off, elems);
           novita_helpers::write_fp8_gptj<head_dim, IS_FP8>(
               v_cache, cache_head_offset, thr_off, elems, v_scale);
         }
       } else if (op == 1) {
         if (write_kv) {
           float elems[EPT];
-          novita_helpers::load_head_gptj<head_dim>(
-              k_in + kv_head * head_dim, thr_off, elems);
-          novita_helpers::rope_gptj<head_dim>(
-              elems, cos_ptr, sin_ptr, lane, rotary_dim);
+          novita_helpers::load_head_gptj<head_dim>(k_in + kv_head * head_dim,
+                                                   thr_off, elems);
+          novita_helpers::rope_gptj<head_dim>(elems, cos_ptr, sin_ptr, lane,
+                                              rotary_dim);
           novita_helpers::write_fp8_gptj<head_dim, IS_FP8>(
               k_cache, cache_head_offset, thr_off, elems, k_scale);
         }
       } else {
         int const q_head = q_start + (op - 2);
         float elems[EPT];
-        novita_helpers::load_head_gptj<head_dim>(
-            q_in + q_head * head_dim, thr_off, elems);
-        novita_helpers::rope_gptj<head_dim>(
-            elems, cos_ptr, sin_ptr, lane, rotary_dim);
+        novita_helpers::load_head_gptj<head_dim>(q_in + q_head * head_dim,
+                                                 thr_off, elems);
+        novita_helpers::rope_gptj<head_dim>(elems, cos_ptr, sin_ptr, lane,
+                                            rotary_dim);
         int64_t const q_offset =
             static_cast<int64_t>(token_idx) * q_output_stride +
             static_cast<int64_t>(q_head) * head_dim;
@@ -409,12 +416,12 @@ __global__ void fusedRopeFP8KVStoreKernelV4(
 }
 
 #define NOVITA_DISPATCH_INTERLEAVE(interleave, INTERLEAVE, ...) \
-  if (interleave) {                                              \
-    const bool INTERLEAVE = true;                                \
-    __VA_ARGS__                                                  \
-  } else {                                                       \
-    const bool INTERLEAVE = false;                               \
-    __VA_ARGS__                                                  \
+  if (interleave) {                                             \
+    const bool INTERLEAVE = true;                               \
+    __VA_ARGS__                                                 \
+  } else {                                                      \
+    const bool INTERLEAVE = false;                              \
+    __VA_ARGS__                                                 \
   }
 
 static void launchFusedRopeFP8KVStore(
@@ -436,34 +443,31 @@ static void launchFusedRopeFP8KVStore(
   int const warps_per_block = total_ops < MAX_WARPS ? total_ops : MAX_WARPS;
   int const blockSize = warps_per_block * 32;
 
-#define NOVITA_LAUNCH_KERNEL(HD, INTERLEAVE)                                     \
-  fusedRopeFP8KVStoreKernelV4<HD, INTERLEAVE, true>                              \
-      <<<grid, blockSize, 0, stream>>>(                                          \
-          reinterpret_cast<__nv_bfloat16 const*>(q),                             \
-          reinterpret_cast<__nv_bfloat16 const*>(k),                             \
-          reinterpret_cast<__nv_bfloat16 const*>(v), num_heads_q, num_heads_k,   \
-          num_heads_v, position_ids, num_tokens, rotary_dim, cos_sin_cache,      \
-          reinterpret_cast<__nv_fp8_e4m3*>(q_output), q_scale, q_output_stride,   \
-          reinterpret_cast<__nv_fp8_e4m3*>(k_cache),                             \
-          reinterpret_cast<__nv_fp8_e4m3*>(v_cache), slot_mapping, k_scale,      \
-          v_scale, num_blocks, block_size_kv, block_stride, page_stride,         \
+#define NOVITA_LAUNCH_KERNEL(HD, INTERLEAVE)                                   \
+  fusedRopeFP8KVStoreKernelV4<HD, INTERLEAVE, true>                            \
+      <<<grid, blockSize, 0, stream>>>(                                        \
+          reinterpret_cast<__nv_bfloat16 const*>(q),                           \
+          reinterpret_cast<__nv_bfloat16 const*>(k),                           \
+          reinterpret_cast<__nv_bfloat16 const*>(v), num_heads_q, num_heads_k, \
+          num_heads_v, position_ids, num_tokens, rotary_dim, cos_sin_cache,    \
+          reinterpret_cast<__nv_fp8_e4m3*>(q_output), q_scale,                 \
+          q_output_stride, reinterpret_cast<__nv_fp8_e4m3*>(k_cache),          \
+          reinterpret_cast<__nv_fp8_e4m3*>(v_cache), slot_mapping, k_scale,    \
+          v_scale, num_blocks, block_size_kv, block_stride, page_stride,       \
           head_stride, max_position)
 
   switch (head_dim) {
     case 64:
-      NOVITA_DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        NOVITA_LAUNCH_KERNEL(64, INTERLEAVE);
-      });
+      NOVITA_DISPATCH_INTERLEAVE(interleave, INTERLEAVE,
+                                 { NOVITA_LAUNCH_KERNEL(64, INTERLEAVE); });
       break;
     case 128:
-      NOVITA_DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        NOVITA_LAUNCH_KERNEL(128, INTERLEAVE);
-      });
+      NOVITA_DISPATCH_INTERLEAVE(interleave, INTERLEAVE,
+                                 { NOVITA_LAUNCH_KERNEL(128, INTERLEAVE); });
       break;
     case 256:
-      NOVITA_DISPATCH_INTERLEAVE(interleave, INTERLEAVE, {
-        NOVITA_LAUNCH_KERNEL(256, INTERLEAVE);
-      });
+      NOVITA_DISPATCH_INTERLEAVE(interleave, INTERLEAVE,
+                                 { NOVITA_LAUNCH_KERNEL(256, INTERLEAVE); });
       break;
     default:
       TORCH_CHECK(false, "Unsupported head dimension: ", head_dim);
@@ -472,13 +476,14 @@ static void launchFusedRopeFP8KVStore(
 #undef NOVITA_LAUNCH_KERNEL
 }
 
-void fused_rope_fp8_kvstore(
-    torch::Tensor& q, torch::Tensor& k, torch::Tensor& v, bool is_neox,
-    torch::Tensor& position_ids, int64_t rotary_dim,
-    torch::Tensor& cos_sin_cache, torch::Tensor& q_output,
-    torch::Tensor& q_scale, torch::Tensor& k_cache, torch::Tensor& v_cache,
-    torch::Tensor& slot_mapping, torch::Tensor& k_scale,
-    torch::Tensor& v_scale) {
+void fused_rope_fp8_kvstore(torch::Tensor& q, torch::Tensor& k,
+                            torch::Tensor& v, bool is_neox,
+                            torch::Tensor& position_ids, int64_t rotary_dim,
+                            torch::Tensor& cos_sin_cache,
+                            torch::Tensor& q_output, torch::Tensor& q_scale,
+                            torch::Tensor& k_cache, torch::Tensor& v_cache,
+                            torch::Tensor& slot_mapping, torch::Tensor& k_scale,
+                            torch::Tensor& v_scale) {
   NOVITA_CHECK_INPUT(q, torch::kBFloat16);
   NOVITA_CHECK_INPUT(k, torch::kBFloat16);
   NOVITA_CHECK_INPUT(v, torch::kBFloat16);
@@ -534,8 +539,9 @@ void fused_rope_fp8_kvstore(
               "num_heads_q must be greater than 0");
   TORCH_CHECK(kv_heads_times_dim / head_dim > 0,
               "num_heads_k must be greater than 0");
-  TORCH_CHECK((q_heads_times_dim / head_dim) % (kv_heads_times_dim / head_dim) == 0,
-              "num_heads_q must be divisible by num_heads_k");
+  TORCH_CHECK(
+      (q_heads_times_dim / head_dim) % (kv_heads_times_dim / head_dim) == 0,
+      "num_heads_q must be divisible by num_heads_k");
 
   int64_t const num_blocks = k_cache.size(0);
   int64_t const block_size_kv = k_cache.size(1);
@@ -560,12 +566,11 @@ void fused_rope_fp8_kvstore(
       reinterpret_cast<int64_t const*>(position_ids.data_ptr()),
       static_cast<int>(rotary_dim),
       reinterpret_cast<__nv_bfloat16 const*>(cos_sin_cache.data_ptr()),
-      q_output.data_ptr(),
-      reinterpret_cast<float const*>(q_scale.data_ptr()), q_output_stride,
-      k_cache.data_ptr(), v_cache.data_ptr(),
+      q_output.data_ptr(), reinterpret_cast<float const*>(q_scale.data_ptr()),
+      q_output_stride, k_cache.data_ptr(), v_cache.data_ptr(),
       reinterpret_cast<int64_t const*>(slot_mapping.data_ptr()),
       reinterpret_cast<float const*>(k_scale.data_ptr()),
-      reinterpret_cast<float const*>(v_scale.data_ptr()),
-      num_blocks, block_size_kv, block_stride, page_stride, head_stride_kv,
+      reinterpret_cast<float const*>(v_scale.data_ptr()), num_blocks,
+      block_size_kv, block_stride, page_stride, head_stride_kv,
       cos_sin_cache.size(0), stream);
 }
