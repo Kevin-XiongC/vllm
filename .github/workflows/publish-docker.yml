@@ -10,7 +10,7 @@ on:
       torch_cuda_arch_list:
         description: 'CUDA architectures to compile for'
         required: false
-        default: '9.0'
+        default: '8.7 8.9 9.0 10.0+PTX 12.0'
       max_jobs:
         description: 'Max parallel compilation jobs'
         required: false

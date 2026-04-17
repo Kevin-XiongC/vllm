@@ -1,4 +1,9 @@
-"""Build only the novita .so extension (without full vllm rebuild)."""
+"""Build only the novita .so extension (without full vllm rebuild).
+
+Target architectures are resolved the same way as vllm's cmake build:
+  1. TORCH_CUDA_ARCH_LIST env var (e.g. "8.0 8.9 9.0")
+  2. Fall back to torch's default arch list for the installed torch version
+"""
 import os
 import torch
 import torch.utils.cpp_extension
@@ -8,11 +13,29 @@ from setuptools import setup
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
-if torch.cuda.is_available():
-    major, minor = torch.cuda.get_device_capability()
-    _arch = f"{major}{minor}"
-else:
-    _arch = "90"
+
+def _gencode_flags() -> list[str]:
+    """Return nvcc -gencode flags matching TORCH_CUDA_ARCH_LIST / cmake."""
+    arch_list_env = os.environ.get("TORCH_CUDA_ARCH_LIST", "").strip()
+    if arch_list_env:
+        archs = arch_list_env.replace(",", " ").split()
+    else:
+        # Mirror what torch's cmake uses when TORCH_CUDA_ARCH_LIST is unset.
+        archs = torch.cuda.get_arch_list()
+
+    flags = []
+    for arch in archs:
+        arch = arch.strip()
+        if not arch:
+            continue
+        # Normalise "8.0" / "8.0+PTX" → "80"
+        ptx = arch.endswith("+PTX")
+        base = arch.replace("+PTX", "").replace(".", "")
+        flags.append(f"-gencode=arch=compute_{base},code=sm_{base}")
+        if ptx:
+            flags.append(f"-gencode=arch=compute_{base},code=compute_{base}")
+    return flags
+
 
 setup(
     name="_novita_C",
@@ -31,7 +54,7 @@ setup(
                 "nvcc": [
                     "-O2",
                     "--use_fast_math",
-                    f"-gencode=arch=compute_{_arch},code=sm_{_arch}",
+                    *_gencode_flags(),
                     "-U__CUDA_NO_HALF_OPERATORS__",
                     "-U__CUDA_NO_HALF_CONVERSIONS__",
                     "-U__CUDA_NO_BFLOAT16_OPERATORS__",
