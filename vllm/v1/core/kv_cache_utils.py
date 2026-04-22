@@ -1339,7 +1339,7 @@ def _report_kv_cache_config(
             dcp_size,
         )
     num_tokens_str = f"{num_tokens:,}"
-    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str, scope="local")
+    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str)
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config
@@ -1348,7 +1348,6 @@ def _report_kv_cache_config(
         "Maximum concurrency for %s tokens per request: %.2fx",
         max_model_len_str,
         max_concurrency,
-        scope="local",
     )
 
 
@@ -1450,7 +1449,6 @@ def _auto_fit_max_model_len(
             "Auto-fit max_model_len: attention-free model, "
             "using derived max_model_len=%d",
             original_max,
-            scope="local",
         )
         return
 
@@ -1477,7 +1475,6 @@ def _auto_fit_max_model_len(
             "Auto-fit max_model_len: full model context length %d fits in "
             "available GPU memory",
             original_max,
-            scope="local",
         )
     else:
         # Need to reduce max_model_len to fit in memory
@@ -1488,7 +1485,6 @@ def _auto_fit_max_model_len(
             original_max,
             auto_fit_max,
             format_gib(limiting_worker_mem),
-            scope="local",
         )
 
 
