@@ -1,0 +1,77 @@
+# Example runner configuration for tools/local_ci.
+#
+# Copy to runner_config.yaml and edit for your machine, then run:
+#   python -m tools.local_ci --config tools/local_ci/runner_config.yaml
+
+# --- Repo layout ------------------------------------------------------------
+
+# Absolute path to the vLLM repo root. Defaults to the current directory
+# when parsing with auto-detection, but it's clearer to set it here.
+repo_root: /path/to/vllm
+
+# Directory containing .buildkite test area YAML files (relative to repo_root).
+test_areas_dir: .buildkite/test_areas
+
+# Default working directory for steps that don't specify `working_dir`.
+# Most Buildkite steps implicitly run from tests/, so this matches.
+default_working_dir: tests
+
+# Path remapping — Buildkite steps are written for Docker layouts like
+# /vllm-workspace/tests. Map those to local paths here. Longest prefix wins.
+path_remap:
+  "/vllm-workspace/tests": tests
+  "/vllm-workspace": "."
+
+# --- Machine capabilities ---------------------------------------------------
+
+# Which Buildkite device labels this machine should claim to be. A step with
+# `device: h100` will only run if "h100" is in this list. Steps with no
+# `device` field always match.
+# Common values: h100, h200_18gb, b200, mi325_1
+local_devices:
+  - h100
+
+# Total GPU count on this machine. Steps requiring more GPUs are skipped.
+# Set to 0 or omit to auto-detect via `nvidia-smi -L`.
+gpu_count: 1
+
+# --- Filtering --------------------------------------------------------------
+
+# Skip steps whose label matches any of these glob patterns.
+skip_patterns:
+  - "* (B200)"                 # skip Blackwell-only variants
+  - "* AMD *"
+  - "Distributed *"            # uncomment if single-GPU only
+
+# Run only these areas (empty = all). Use the `group:` name or YAML stem.
+include_areas: []
+# Example:
+# include_areas:
+#   - Basic Correctness
+#   - Models - Language
+#   - Engine
+
+# Exclude these areas. Takes priority over include_areas.
+exclude_areas:
+  - LM Eval                    # very slow; overnight only
+  - E2E Integration            # needs 4+ GPUs
+  - Benchmarks                 # not a correctness signal
+
+# By default, steps marked `optional: true` are skipped. Pass
+# --include-optional on the CLI to override.
+skip_optional: true
+
+# --- Output -----------------------------------------------------------------
+
+# Directory (relative to repo_root) for logs and JSON reports. Each run gets
+# a timestamped subdirectory.
+results_dir: ci_results
+
+# --- Environment ------------------------------------------------------------
+
+# Extra environment variables injected into every step. Useful for controlling
+# things like HF cache location or disabling telemetry.
+env:
+  HF_HUB_DISABLE_TELEMETRY: "1"
+  # HF_HOME: /mnt/cache/huggingface
+  # VLLM_USE_PRECOMPILED: "1"
