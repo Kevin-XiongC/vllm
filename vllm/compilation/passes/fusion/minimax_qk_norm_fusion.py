@@ -46,7 +46,7 @@ from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
 
-MAX_TOKEN_NUM = 2048
+MAX_TOKEN_NUM = 16384
 
 _MINIMAX_QK_NORM_FUSED_OP = None
 if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
@@ -197,6 +197,31 @@ class MiniMaxQKNormPattern:
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
         )
 
+        # MiniMaxM2Attention calls forward_qk(q.contiguous(), k.contiguous()); the FX
+        # graph contains contiguous between split and to(float32), so match it.
+        def pattern_contiguous(
+            qkv: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+            q = q.contiguous()
+            k = k.contiguous()
+            q_fp32 = q.to(torch.float32)
+            k_fp32 = k.to(torch.float32)
+            q_var = q_fp32.pow(2).mean(dim=-1, keepdim=True)
+            k_var = k_fp32.pow(2).mean(dim=-1, keepdim=True)
+            qk_var = torch.cat([q_var, k_var], dim=-1)
+            qk_var = tensor_model_parallel_all_reduce(qk_var) / tp_world
+            q_var, k_var = qk_var.chunk(2, dim=-1)
+            q_out = (q_fp32 * torch.rsqrt(q_var + eps) * q_weight).to(dtype)
+            k_out = (k_fp32 * torch.rsqrt(k_var + eps) * k_weight).to(dtype)
+            return q_out, k_out, v
+
+        pm.register_replacement(
+            pattern_contiguous, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
         # Second pattern: three separate split_with_sizes nodes (one per output),
         # each with _users=1. This occurs when the QKV projection uses a
         # functional GEMM kernel (e.g. cutlass_scaled_mm via auto_functionalized),
@@ -222,6 +247,33 @@ class MiniMaxQKNormPattern:
 
         pm.register_replacement(
             pattern_split3, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+        def pattern_split3_contiguous(
+            qkv: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            q = qkv.split([q_size, kv_size, kv_size], dim=-1)[0].contiguous()
+            k = qkv.split([q_size, kv_size, kv_size], dim=-1)[1].contiguous()
+            v = qkv.split([q_size, kv_size, kv_size], dim=-1)[2]
+            q_fp32 = q.to(torch.float32)
+            k_fp32 = k.to(torch.float32)
+            q_var = q_fp32.pow(2).mean(dim=-1, keepdim=True)
+            k_var = k_fp32.pow(2).mean(dim=-1, keepdim=True)
+            qk_var = torch.cat([q_var, k_var], dim=-1)
+            qk_var = tensor_model_parallel_all_reduce(qk_var) / tp_world
+            q_var, k_var = qk_var.chunk(2, dim=-1)
+            q_out = (q_fp32 * torch.rsqrt(q_var + eps) * q_weight).to(dtype)
+            k_out = (k_fp32 * torch.rsqrt(k_var + eps) * k_weight).to(dtype)
+            return q_out, k_out, v
+
+        pm.register_replacement(
+            pattern_split3_contiguous,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
         )
 
 

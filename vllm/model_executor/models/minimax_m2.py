@@ -32,7 +32,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -221,6 +221,94 @@ class MiniMaxM2Attention(nn.Module):
             self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps
         )
 
+        self._rotary_dim = rotary_dim
+
+        _vllm_config = get_current_vllm_config()
+        self._use_fused_fp8_kvstore = (
+            _vllm_config.compilation_config.pass_config.enable_rope_fp8_kvstore_fusion
+        )
+        if self._use_fused_fp8_kvstore:
+            from vllm.novita_ops import is_novita_available
+
+            assert is_novita_available(), (
+                "novita_kernels (_novita_C) not available but "
+                "enable_rope_fp8_kvstore_fusion is set"
+            )
+            self._init_fused_buffers(_vllm_config)
+
+    # Class-level shared buffers — allocated once, reused by all layers.
+    _fused_output_buf: torch.Tensor | None = None
+    _fused_q_output_buf: torch.Tensor | None = None
+
+    @classmethod
+    def _init_fused_buffers(cls, vllm_config: "VllmConfig") -> None:
+        if cls._fused_output_buf is not None:
+            return
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        device = torch.device("cuda", torch.accelerator.current_device_index())
+        num_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config
+        )
+        head_dim = getattr(
+            vllm_config.model_config.hf_config,
+            "head_dim",
+            vllm_config.model_config.hf_config.hidden_size
+            // vllm_config.model_config.hf_config.num_attention_heads,
+        )
+        q_size = num_heads * head_dim
+        cls._fused_output_buf = torch.empty(
+            max_num_tokens, q_size, dtype=torch.bfloat16, device=device
+        )
+        cls._fused_q_output_buf = torch.empty(
+            max_num_tokens, q_size, dtype=torch.float8_e4m3fn, device=device
+        )
+
+    def _fused_rope_fp8_kvstore_fwd(
+        self,
+        positions: torch.Tensor,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> torch.Tensor:
+        """Fused path via ``novita_fused_rope_fp8_kvstore`` custom op.
+
+        The custom op is opaque to torch.compile / dynamo and registered
+        as a splitting op, so CUDA graphs and piecewise compilation remain
+        fully functional.  ``output`` and ``q_output`` use class-level
+        persistent buffers shared across all layers so their addresses are
+        stable across piecewise CUDA-graph replays.
+        """
+        num_tokens = q.shape[0]
+        output = MiniMaxM2Attention._fused_output_buf[:num_tokens]
+        q_output = MiniMaxM2Attention._fused_q_output_buf[:num_tokens]
+
+        cos_sin_cache = self.rotary_emb.cos_sin_cache
+        if cos_sin_cache.dtype != torch.bfloat16:
+            cos_sin_cache = cos_sin_cache.to(torch.bfloat16)
+
+        torch.ops.vllm.novita_fused_rope_fp8_kvstore(
+            q.contiguous(),
+            k.contiguous(),
+            v.contiguous(),
+            positions,
+            cos_sin_cache,
+            self.attn._q_scale,
+            self.attn._k_scale,
+            self.attn._v_scale,
+            output,
+            q_output,
+            self.attn.layer_name,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.q_size,
+            self.kv_size,
+            self._rotary_dim,
+        )
+
+        output, _ = self.o_proj(output)
+        return output
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -228,7 +316,11 @@ class MiniMaxM2Attention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = MiniMaxText01RMSNormTP.forward_qk(self.q_norm, self.k_norm, q, k)
+        q, k = MiniMaxText01RMSNormTP.forward_qk(
+            self.q_norm, self.k_norm, q.contiguous(), k.contiguous()
+        )
+        if self._use_fused_fp8_kvstore:
+            return self._fused_rope_fp8_kvstore_fwd(positions, q, k, v)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)

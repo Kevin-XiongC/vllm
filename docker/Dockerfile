@@ -231,7 +231,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 WORKDIR /workspace
 
-COPY pyproject.toml setup.py CMakeLists.txt ./
+COPY pyproject.toml setup.py CMakeLists.txt build_novita.py ./
 COPY cmake cmake/
 COPY csrc csrc/
 COPY vllm/envs.py vllm/envs.py
@@ -311,6 +311,24 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         export VLLM_DOCKER_BUILD_CONTEXT=1 && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
+
+# If the main build used a precompiled wheel (VLLM_USE_PRECOMPILED=1), novita
+# kernels were skipped by cmake. Build via build_novita.py and inject the .so
+# into the wheel so downstream stages can extract it.
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    WHL=$(ls dist/*.whl 2>/dev/null | head -1) && \
+    if [ -z "$WHL" ]; then echo "No wheel found, skipping novita injection"; exit 0; fi && \
+    python3 -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); sys.exit(0 if 'vllm/_novita_C.abi3.so' in z.namelist() else 1)" "$WHL" && \
+    echo "_novita_C.abi3.so already in wheel" || ( \
+        echo "Building _novita_C via build_novita.py and injecting into wheel..." && \
+        python3 build_novita.py build_ext --inplace && \
+        NOVITA_SO=$(find vllm -name "_novita_C*.so" | head -1) && \
+        if [ -n "$NOVITA_SO" ]; then \
+            python3 -c "import zipfile,sys; whl,so=sys.argv[1],sys.argv[2]; z=zipfile.ZipFile(whl,'a'); z.write(so,'vllm/_novita_C.abi3.so'); z.close(); print('Injected '+so+' into '+whl)" "$WHL" "$NOVITA_SO"; \
+        else \
+            echo "WARNING: novita .so not found after build_novita.py"; \
+        fi \
+    )
 
 #################### CSRC BUILD IMAGE ####################
 
@@ -577,6 +595,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
+# Install sgl-kernel early to fail fast (public release, no auth needed).
+# Only installed for CUDA 12.9 builds.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    SGL_KERNEL_WHL_URL="https://github.com/novitalabs/sglang/releases/download/0.4.1/sglang_kernel-0.4.1-cp310-abi3-linux_x86_64.whl" && \
+    CUDA_VERSION_SHORT=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
+    if [ "$CUDA_VERSION_SHORT" != "129" ]; then \
+        echo "Skipping sgl-kernel: only installed for CUDA 12.9 (got ${CUDA_VERSION})"; \
+        exit 0; \
+    fi && \
+    uv pip install --system --no-deps "$SGL_KERNEL_WHL_URL"
+
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
@@ -666,6 +695,7 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
