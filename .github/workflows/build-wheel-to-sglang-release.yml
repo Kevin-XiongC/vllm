@@ -1,0 +1,269 @@
+name: Build Wheel To SGLang Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      cuda_variant:
+        description: "CUDA variant to build"
+        required: true
+        default: "cu129"
+      target_repo:
+        description: "Repository that will host the public release asset"
+        required: false
+        default: "novitalabs/sglang"
+      sglang_repo:
+        description: "Repository to clone inside the container"
+        required: false
+        default: "https://github.com/sgl-project/sglang"
+      sglang_ref:
+        description: "SGLang tag, branch, or commit to build"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-upload:
+    if: github.repository == 'novitalabs/vllm-int'
+    runs-on:
+      - self-hosted
+      - gpu-4090-2
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ secrets.SGLANG_RELEASE_TOKEN }}
+      BUILD_JOBS: "32"
+      SGLANG_SRC_DIR: /tmp/sglang-src-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Resolve build config
+        id: config
+        run: |
+          case "${{ inputs.cuda_variant }}" in
+            cu129)
+              echo "cuda_label=cu129" >> "${GITHUB_OUTPUT}"
+              echo "builder_image=vllm/vllm-openai:nightly" >> "${GITHUB_OUTPUT}"
+              ;;
+            cu130)
+              echo "cuda_label=cu130" >> "${GITHUB_OUTPUT}"
+              echo "builder_image=vllm/vllm-openai:cu130-nightly" >> "${GITHUB_OUTPUT}"
+              ;;
+            *)
+              echo "Unsupported cuda_variant: ${{ inputs.cuda_variant }}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.1
+        with:
+          clean: false
+
+      - name: Check required tools
+        run: |
+          command -v docker >/dev/null 2>&1 || { echo "docker is required on the runner"; exit 1; }
+          docker --version
+          if command -v gh >/dev/null 2>&1; then
+            gh --version
+            exit 0
+          fi
+
+          sudo apt-get update
+          sudo apt-get install -y gh
+          gh --version
+
+      - name: Checkout sglang source
+        run: |
+          rm -rf "${SGLANG_SRC_DIR}"
+          git clone "${{ inputs.sglang_repo }}" "${SGLANG_SRC_DIR}"
+          cd "${SGLANG_SRC_DIR}"
+          if [ -n "${{ inputs.sglang_ref }}" ]; then
+            git checkout "${{ inputs.sglang_ref }}"
+          fi
+
+      - name: Build and upload wheel
+        env:
+          CUDA_LABEL: ${{ steps.config.outputs.cuda_label }}
+          BUILDER_IMAGE: ${{ steps.config.outputs.builder_image }}
+          CONTAINER_NAME: sglang-wheel-build-${{ steps.config.outputs.cuda_label }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euxo pipefail
+
+          wheel_out_base="${RUNNER_TEMP}/sglang-wheel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          out_dir="${wheel_out_base}/${CUDA_LABEL}"
+          rm -rf "${out_dir}"
+          mkdir -p "${out_dir}"
+
+          release_version="$(
+            awk '
+              /^\[project\]$/ { in_project=1; next }
+              /^\[/ && in_project { exit }
+              in_project && $1 == "version" {
+                gsub(/"/, "", $3)
+                print $3
+                exit
+              }
+            ' "${SGLANG_SRC_DIR}/sgl-kernel/pyproject.toml"
+          )"
+
+          if [ -z "${release_version}" ]; then
+            echo "Failed to determine sgl-kernel version." >&2
+            exit 1
+          fi
+
+          release_tag="${release_version}"
+          docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+
+          docker run --name "${CONTAINER_NAME}" \
+            --network=host \
+            --entrypoint bash \
+            -e BUILD_JOBS="${BUILD_JOBS}" \
+            -v "${out_dir}:/out" \
+            -v "${SGLANG_SRC_DIR}:/workspace/sglang-src:ro" \
+            "${BUILDER_IMAGE}" \
+            -lc '
+              set -euxo pipefail
+
+              apt-get update
+              apt-get install -y \
+                git \
+                ca-certificates
+
+              # Configure pip and uv to use the USTC mirror so downloads
+              # succeed on runners with limited PyPI connectivity.
+              export PIP_INDEX_URL="https://mirrors.ustc.edu.cn/pypi/simple"
+              mkdir -p /etc/uv
+              printf "[[index]]\nurl = \"https://mirrors.ustc.edu.cn/pypi/simple\"\ndefault = true\n" \
+                > /etc/uv/uv.toml
+
+              if ! command -v uv >/dev/null 2>&1; then
+                python3 -m pip install uv
+              fi
+
+              rm -rf /tmp/sglang-build
+              cp -a /workspace/sglang-src /tmp/sglang-build
+              cd /tmp/sglang-build/sgl-kernel
+
+              CUDA_ROOT=/usr/local/cuda
+              CUDA_LIB_DIR=
+              for candidate in \
+                /usr/local/cuda/lib64 \
+                /usr/local/cuda/targets/x86_64-linux/lib
+              do
+                if [ -e "${candidate}" ]; then
+                  CUDA_LIB_DIR="$(realpath "${candidate}")"
+                  break
+                fi
+              done
+
+              if [ -z "${CUDA_LIB_DIR}" ]; then
+                echo "Failed to locate CUDA library directory." >&2
+                exit 1
+              fi
+
+              # The vLLM nightly image ships several CUDA libs (cublas,
+              # cublasLt, nvrtc, nvblas, ...) only as versioned .so.<major>
+              # files; ld -l<name> needs the unversioned .so symlink. Walk
+              # the directory and create any missing symlinks, pointing at
+              # the SONAME (shortest versioned form, which is what the glob
+              # yields first in sorted order).
+              (
+                cd "${CUDA_LIB_DIR}"
+                for ver_file in *.so.*; do
+                  [ -e "${ver_file}" ] || continue
+                  base="${ver_file%%.so.*}"
+                  [ -e "${base}.so" ] && continue
+                  for cand in "${base}".so.*; do
+                    [ -e "${cand}" ] || continue
+                    ln -sf "${cand}" "${base}.so"
+                    break
+                  done
+                done
+              )
+
+              NVRTC_LIB="$(ls -1 "${CUDA_LIB_DIR}"/libnvrtc.so* 2>/dev/null | sort | head -1)"
+              if [ -z "${NVRTC_LIB}" ]; then
+                echo "Failed to locate libnvrtc in ${CUDA_LIB_DIR}." >&2
+                exit 1
+              fi
+
+              CUDA_PYTHON_INCLUDE_DIRS="$(
+                find /usr/local/lib/python3.12/dist-packages/nvidia -type d -path "*/include" 2>/dev/null | sort | paste -sd: -
+              )"
+              if [ -z "${CUDA_PYTHON_INCLUDE_DIRS}" ]; then
+                echo "Failed to locate CUDA include directories in Python packages." >&2
+                exit 1
+              fi
+
+              export CUDA_TOOLKIT_ROOT_DIR="${CUDA_ROOT}"
+              export CUDAToolkit_ROOT="${CUDA_ROOT}"
+              export CMAKE_PREFIX_PATH="${CUDA_ROOT}:${CMAKE_PREFIX_PATH:-}"
+              export CMAKE_LIBRARY_PATH="${CUDA_LIB_DIR}:${CMAKE_LIBRARY_PATH:-}"
+              export CMAKE_INCLUDE_PATH="${CUDA_PYTHON_INCLUDE_DIRS}:${CUDA_ROOT}/targets/x86_64-linux/include:${CMAKE_INCLUDE_PATH:-}"
+              export CPATH="${CUDA_PYTHON_INCLUDE_DIRS}:${CUDA_ROOT}/targets/x86_64-linux/include:${CPATH:-}"
+              export CPLUS_INCLUDE_PATH="${CUDA_PYTHON_INCLUDE_DIRS}:${CUDA_ROOT}/targets/x86_64-linux/include:${CPLUS_INCLUDE_PATH:-}"
+              export LD_LIBRARY_PATH="${CUDA_LIB_DIR}:${CUDA_ROOT}/lib64:${LD_LIBRARY_PATH:-}"
+              export CMAKE_BUILD_PARALLEL_LEVEL="${BUILD_JOBS}"
+              export MAX_JOBS="${BUILD_JOBS}"
+              export NVCC_THREADS="${BUILD_JOBS}"
+              export CMAKE_ARGS="-DCUDA_nvrtc_LIBRARY=${NVRTC_LIB} -DCUDA_TOOLKIT_ROOT_DIR=${CUDA_ROOT} -DCUDAToolkit_ROOT=${CUDA_ROOT} ${CMAKE_ARGS:-}"
+
+              python3 -m pip install scikit-build-core "cmake>=3.26,<4" ninja
+              uv build --wheel -Cbuild-dir=build . --no-build-isolation
+              cp dist/*.whl /out/
+            '
+
+          # Create the release if absent. `|| true` covers the race where a
+          # concurrent run for another CUDA variant created it first.
+          if ! gh release view "${release_tag}" --repo "${{ inputs.target_repo }}" >/dev/null 2>&1; then
+            gh release create "${release_tag}" \
+              --repo "${{ inputs.target_repo }}" \
+              --title "sgl-kernel ${release_tag}" \
+              --notes "Automated wheel upload from ${GITHUB_REPOSITORY}@${GITHUB_SHA}." \
+              || true
+          fi
+
+          wheel_path="$(find "${out_dir}" -maxdepth 1 -name '*.whl' | head -1)"
+          if [ -z "${wheel_path}" ]; then
+            echo "No wheel was produced for ${CUDA_LABEL}." >&2
+            exit 1
+          fi
+
+          # Inject the CUDA variant as a PEP 440 local version (e.g.
+          # sgl_kernel-0.x.y+cu129-cp312-...whl) so cu129 and cu130 wheels
+          # can coexist as assets of a single release.
+          orig_name="$(basename "${wheel_path}")"
+          renamed="$(echo "${orig_name}" | sed -E "s/^([^-]+-[^-]+)-/\1+${CUDA_LABEL}-/")"
+          if [ "${renamed}" != "${orig_name}" ]; then
+            mv "${wheel_path}" "${out_dir}/${renamed}"
+            wheel_path="${out_dir}/${renamed}"
+          fi
+
+          gh release upload "${release_tag}" "${wheel_path}" \
+            --repo "${{ inputs.target_repo }}" \
+            --clobber
+
+          wheel_name="$(basename "${wheel_path}")"
+          asset_url="https://github.com/${{ inputs.target_repo }}/releases/download/${release_tag}/${wheel_name}"
+
+          {
+            echo "## ${CUDA_LABEL}"
+            echo
+            echo "- Builder image: \`${BUILDER_IMAGE}\`"
+            echo "- Release tag: \`${release_tag}\`"
+            echo "- Wheel: \`${wheel_name}\`"
+            echo "- URL: \`${asset_url}\`"
+            echo
+            echo '```bash'
+            echo "pip install \"${asset_url}\""
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Cleanup local docker artifacts
+        if: always()
+        env:
+          CONTAINER_NAME: sglang-wheel-build-${{ steps.config.outputs.cuda_label }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+          rm -rf "${SGLANG_SRC_DIR}"
+          wheel_out_base="${RUNNER_TEMP}/sglang-wheel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf "${wheel_out_base}"

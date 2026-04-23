@@ -4,14 +4,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
-import regex as re
 import shlex
 import signal
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+import regex as re
 
 from .config import RunnerConfig, Step
 
@@ -158,10 +160,9 @@ def run_step(
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid, signal.SIGTERM)
             time.sleep(5)
-            try:
+            # Process group may have already exited after SIGTERM.
+            with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass  # process group already exited after SIGTERM
             proc.wait()  # reap to avoid zombie
             duration = time.monotonic() - start
             return StepResult(

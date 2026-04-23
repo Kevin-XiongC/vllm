@@ -113,7 +113,9 @@ def detect_gpu_count() -> int:
             timeout=10,
         )
         if result.returncode == 0:
-            return len([l for l in result.stdout.strip().splitlines() if l.strip()])
+            return len(
+                [line for line in result.stdout.strip().splitlines() if line.strip()]
+            )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
     return 0
