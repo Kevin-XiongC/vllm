@@ -27,6 +27,10 @@ on:
         description: 'Dockerfile target stage to build'
         required: false
         default: 'vllm-openai'
+      vllm_main_cuda_version:
+        description: 'CUDA version for precompiled vLLM wheel, could be 12.9 or 13.0.'
+        required: false
+        default: '12.9'
 
 env:
   REGISTRY: ghcr.io
@@ -70,6 +74,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve VLLM_MAIN_CUDA_VERSION
+        id: cuda_ver
+        run: |
+          if [ -n "${{ inputs.vllm_main_cuda_version }}" ]; then
+            echo "value=${{ inputs.vllm_main_cuda_version }}" >> "$GITHUB_OUTPUT"
+          else
+            # Derive major.minor from cuda_version (e.g. "13.0.2" → "13.0")
+            echo "value=$(echo '${{ inputs.cuda_version }}' | cut -d. -f1,2)" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -88,6 +102,7 @@ jobs:
             torch_cuda_arch_list=${{ inputs.torch_cuda_arch_list }}
             RUN_WHEEL_CHECK=false
             VLLM_USE_PRECOMPILED=1
+            VLLM_MAIN_CUDA_VERSION=${{ steps.cuda_ver.outputs.value }}
             ${{ inputs.precompiled_wheel_commit != '' && format('VLLM_MERGE_BASE_COMMIT={0}', inputs.precompiled_wheel_commit) || '' }}
           cache-from: type=local,src=/tmp/.buildx-cache-vllm
           cache-to: type=local,dest=/tmp/.buildx-cache-vllm,mode=max
