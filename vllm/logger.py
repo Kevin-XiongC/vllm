@@ -200,6 +200,22 @@ def _configure_vllm_root_logger() -> None:
     if logging_config:
         dictConfig(logging_config)
 
+    if AICLOUD_LOG_DIR := os.getenv("AICLOUD_LOG_DIR"):
+        from logging.handlers import RotatingFileHandler
+
+        from vllm.aicloud_utils import LogstashFormatter
+
+        log_file_path = os.path.join(AICLOUD_LOG_DIR, "vllm.log")
+        # Each log file is 1GB, keep last 10 log files
+        file_handler = RotatingFileHandler(
+            log_file_path, maxBytes=int(1e9), backupCount=10
+        )
+        formatter = LogstashFormatter()
+        file_handler.setFormatter(formatter)
+
+        root_logger = logging.getLogger()
+        root_logger.addHandler(file_handler)
+
 
 def init_logger(name: str) -> _VllmLogger:
     """The main purpose of this function is to ensure that loggers are
