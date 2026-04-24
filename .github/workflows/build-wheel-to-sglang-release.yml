@@ -262,8 +262,24 @@ jobs:
         if: always()
         env:
           CONTAINER_NAME: sglang-wheel-build-${{ steps.config.outputs.cuda_label }}-${{ github.run_id }}-${{ github.run_attempt }}
+          BUILDER_IMAGE: ${{ steps.config.outputs.builder_image }}
         run: |
           docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+          if [ -n "${BUILDER_IMAGE}" ]; then
+            docker rmi "${BUILDER_IMAGE}" >/dev/null 2>&1 || true
+          fi
+          # Earlier workflow versions built sgl-kernel directly inside
+          # ${GITHUB_WORKSPACE}/sglang-src via a read-write Docker mount,
+          # leaving root-owned build artifacts (e.g. sgl-kernel/build/).
+          # The runner user cannot unlink those files, so we use a throwaway
+          # root container to chmod them before removing.
+          if [ -d "${GITHUB_WORKSPACE}/sglang-src" ]; then
+            docker run --rm \
+              -v "${GITHUB_WORKSPACE}/sglang-src:/to-clean" \
+              busybox \
+              sh -c "chmod -R a+rwX /to-clean" >/dev/null 2>&1 || true
+            rm -rf "${GITHUB_WORKSPACE}/sglang-src"
+          fi
           rm -rf "${SGLANG_SRC_DIR}"
           wheel_out_base="${RUNNER_TEMP}/sglang-wheel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           rm -rf "${wheel_out_base}"
