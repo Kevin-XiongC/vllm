@@ -282,6 +282,13 @@ def build_app(
     # Add scaling middleware to check for scaling state
     app.add_middleware(ScalingMiddleware)
 
+    # Reject new inference requests while the server is draining.
+    # Only needed in DP mode (dp_size > 1).
+    if getattr(args, "data_parallel_size", 1) > 1:
+        from vllm.entrypoints.serve.poison.middleware import DrainMiddleware
+
+        app.add_middleware(DrainMiddleware)
+
     if "realtime" in supported_tasks:
         # Add WebSocket metrics middleware
         from vllm.entrypoints.openai.realtime.metrics import (

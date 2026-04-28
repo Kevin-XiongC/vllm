@@ -52,6 +52,16 @@ def register_vllm_serve_api_routers(app: FastAPI):
 
     attach_tokenize_router(app)
 
+    # Poison/drain coordination routes are only needed in DP mode.
+    args = getattr(getattr(app, "state", None), "args", None)
+    dp_size = getattr(args, "data_parallel_size", 1) if args else 1
+    if dp_size > 1:
+        from vllm.entrypoints.serve.poison.api_router import (
+            attach_router as attach_poison_router,
+        )
+
+        attach_poison_router(app)
+
     from .instrumentator import register_instrumentator_api_routers
 
     register_instrumentator_api_routers(app)

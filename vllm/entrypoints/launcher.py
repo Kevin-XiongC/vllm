@@ -78,8 +78,55 @@ async def serve_http(
 
     loop = asyncio.get_running_loop()
 
-    watchdog_task = loop.create_task(watchdog_loop(server, app.state.engine_client))
+    engine_client: EngineClient = app.state.engine_client
+    watchdog_task = loop.create_task(watchdog_loop(server, engine_client))
     server_task = loop.create_task(server.serve(sockets=[sock] if sock else None))
+
+    # Inject drain context so the poison router can control the uvicorn server.
+    # Defaults for non-DP mode; overwritten below when vllm_config is present.
+    dp_rank = 0
+    dp_size = 1
+    try:
+        from vllm.entrypoints.serve.poison.api_router import (
+            register_self,
+            register_with_rank0,
+            set_drain_context,
+        )
+        from vllm.utils.network_utils import get_ip
+
+        vllm_config = getattr(app.state, "vllm_config", None)
+        if vllm_config is not None:
+            pc = vllm_config.parallel_config
+            dp_rank = pc.data_parallel_rank
+            dp_size = pc.data_parallel_size
+
+        port = uvicorn_kwargs.get("port", 8000)
+        self_url = f"http://{get_ip()}:{port}"
+
+        # Build rank-0 URL for non-rank-0 drain coordination.
+        rank0_url = None
+        if vllm_config is not None and dp_size > 1:
+            rank0_url = f"http://{pc.data_parallel_master_ip}:{port}"
+
+        set_drain_context(
+            engine_client=engine_client,
+            uvicorn_server=server,
+            dp_rank=dp_rank,
+            dp_size=dp_size,
+            rank0_url=rank0_url,
+        )
+
+        # HTTP peer registration: each rank registers its URL with rank 0.
+        if dp_size > 1:
+            if dp_rank == 0:
+                register_self(rank=0, url=self_url)
+            else:
+                assert rank0_url is not None
+                loop.create_task(register_with_rank0(rank0_url, dp_rank, self_url))
+    except Exception:
+        logger.warning(
+            "Could not set drain context; graceful drain will not work.", exc_info=True
+        )
 
     ssl_cert_refresher = (
         None
@@ -94,8 +141,31 @@ async def serve_http(
 
     shutdown_event = asyncio.Event()
 
-    def signal_handler() -> None:
+    def _force_shutdown() -> None:
+        """Immediate shutdown path (SIGINT or second SIGTERM)."""
         shutdown_event.set()
+
+    def signal_handler() -> None:
+        """First signal: start graceful drain; second signal: force exit."""
+        from vllm.entrypoints.serve.poison.api_router import (
+            get_drain_status,
+            handle_shutdown_signal,
+        )
+
+        if get_drain_status() == "idle":
+            logger.info(
+                "Shutdown signal received — starting graceful drain on rank %d.",
+                dp_rank,
+            )
+            handle_shutdown_signal(loop)
+            if ssl_cert_refresher:
+                ssl_cert_refresher.stop()
+        else:
+            logger.warning(
+                "Second shutdown signal — forcing immediate shutdown on rank %d.",
+                dp_rank,
+            )
+            _force_shutdown()
 
     async def dummy_shutdown() -> None:
         pass
@@ -161,6 +231,14 @@ def terminate_if_errored(server: uvicorn.Server, engine: EngineClient):
     because handler must first return to close the connection
     for this request.
     """
+    # During graceful drain, the engine is intentionally shutting down.
+    # Skip the watchdog check to avoid prematurely killing the HTTP server
+    # before drain coordination (dpexit/*) completes.
+    from vllm.entrypoints.serve.poison.api_router import get_drain_status
+
+    if get_drain_status() != "idle":
+        return
+
     engine_errored = engine.errored and not engine.is_running
     if not envs.VLLM_KEEP_ALIVE_ON_ENGINE_DEATH and engine_errored:
         server.should_exit = True
