@@ -79,10 +79,35 @@ if [[ -n "$(git status --porcelain)" ]]; then
     exit 1
 fi
 
-if [[ -e "$(git rev-parse --git-path CHERRY_PICK_HEAD)" ]]; then
-    echo "error: a cherry-pick is already in progress. Resolve it first:" >&2
-    echo "  git cherry-pick --continue   # or --abort / --skip" >&2
-    exit 1
+cherry_pick_head_path() {
+    git rev-parse --git-path CHERRY_PICK_HEAD
+}
+
+empty_cherry_pick_in_progress() {
+    [[ -e "$(cherry_pick_head_path)" ]] &&
+        git diff --quiet &&
+        git diff --cached --quiet
+}
+
+skip_empty_cherry_pick() {
+    local picked_commit
+    local picked_short
+
+    picked_commit=$(cat "$(cherry_pick_head_path)")
+    picked_short=$(git rev-parse --short "$picked_commit")
+    echo "Skipping empty cherry-pick $picked_short."
+    git cherry-pick --skip
+    HASH="$picked_commit"
+}
+
+if [[ -e "$(cherry_pick_head_path)" ]]; then
+    if empty_cherry_pick_in_progress; then
+        skip_empty_cherry_pick
+    else
+        echo "error: a cherry-pick is already in progress. Resolve it first:" >&2
+        echo "  git cherry-pick --continue   # or --abort / --skip" >&2
+        exit 1
+    fi
 fi
 
 # Oldest-first list of commits to pick (exclusive of HASH).
@@ -111,6 +136,11 @@ for c in "${COMMITS[@]}"; do
     subject=$(git log -1 --format='%s' "$c")
     echo ">>> Cherry-picking $short $subject"
     if ! git cherry-pick -x "$c"; then
+        if empty_cherry_pick_in_progress; then
+            skip_empty_cherry_pick
+            continue
+        fi
+
         echo
         echo "!!! Conflict on $short. To resume:"
         echo "  1. Resolve conflicts, 'git add' the files"
