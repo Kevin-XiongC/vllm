@@ -240,8 +240,8 @@ class ToolCall(OpenAIBaseModel):
 
 
 class DeltaFunctionCall(BaseModel):
-    name: str | None = None
-    arguments: str | None = None
+    name: str = ""
+    arguments: str = ""
 
 
 # a tool call delta where everything is optional
