@@ -187,6 +187,12 @@ class EngineCoreOutput(
 
     prefill_stats: PrefillStats | None = None
 
+    # The number of cached tokens to report in user-facing outputs. Used by
+    # PD-disaggregated deployments to thread the prefill side's cached-token
+    # count through to the decode side for billing/usage reporting. None when
+    # not in a PD-disagg context; the decode side then falls back to its own
+    # prefill_stats.num_cached_tokens (which is 0 on a pure remote-prefill).
+    num_cached_tokens_for_output: int | None = None
     routed_experts: np.ndarray | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.

@@ -1428,6 +1428,9 @@ class Scheduler(SchedulerInterface):
                         prefill_stats=request.take_prefill_stats(),
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
+                        num_cached_tokens_for_output=(
+                            request.num_cached_tokens_for_output
+                        ),
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
@@ -1454,6 +1457,9 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
+                        num_cached_tokens_for_output=(
+                            request.num_cached_tokens_for_output
+                        ),
                     )
                 )
 

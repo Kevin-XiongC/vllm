@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    PREFILL_NUM_CACHED_TOKENS_KEY,
+)
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
@@ -156,6 +159,10 @@ class Request:
         self.all_token_ids = ConstantList(self._all_token_ids)
         # trace_headers
         self.trace_headers = trace_headers
+        # Holds the prefill-side cached-token count surfaced by the KV
+        # connector for PD-disaggregated deployments. -1 means "not yet
+        # resolved"; resolves lazily via num_cached_tokens_for_output.
+        self._num_cached_tokens_for_output: int = -1
 
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
@@ -186,6 +193,27 @@ class Request:
         # If True, request should be aborted immediately after being added to
         # the scheduler so the connector's request_finished hook runs.
         self.abort_immediately = abort_immediately
+
+    @property
+    def num_cached_tokens_for_output(self) -> int | None:
+        if self._num_cached_tokens_for_output == -1:
+            self._num_cached_tokens_for_output = (
+                self._extract_num_cached_tokens_for_output()
+            )
+        if self._num_cached_tokens_for_output == -1:
+            return None
+        return self._num_cached_tokens_for_output
+
+    def _extract_num_cached_tokens_for_output(self) -> int:
+        params = self.kv_transfer_params or {}
+        prefill_num_cached_tokens = params.get(PREFILL_NUM_CACHED_TOKENS_KEY)
+        if (
+            isinstance(prefill_num_cached_tokens, int)
+            and not isinstance(prefill_num_cached_tokens, bool)
+            and prefill_num_cached_tokens >= 0
+        ):
+            return prefill_num_cached_tokens
+        return -1
 
     @classmethod
     def from_engine_core_request(

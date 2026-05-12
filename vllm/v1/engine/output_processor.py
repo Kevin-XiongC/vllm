@@ -648,6 +648,13 @@ class OutputProcessor:
                     req_state.num_cached_tokens = (
                         engine_core_output.prefill_stats.num_cached_tokens
                     )
+                # PD-disagg: when the prefill side propagated its cached-token
+                # count via the KV connector, prefer it over our local prefill
+                # stats (which would be 0 since we only received KV).
+                if engine_core_output.num_cached_tokens_for_output is not None:
+                    req_state.num_cached_tokens = (
+                        engine_core_output.num_cached_tokens_for_output
+                    )
                 req_state.is_prefilling = False
 
             if pooling_output is None:

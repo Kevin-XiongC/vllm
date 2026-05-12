@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    PREFILL_NUM_CACHED_TOKENS_KEY,
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
@@ -573,7 +574,7 @@ class NixlConnectorScheduler:
 
             remote_num_tokens = request.num_computed_tokens
 
-        return delay_free_blocks, dict(
+        kv_transfer_params = dict(
             do_remote_prefill=is_p_node,
             do_remote_decode=is_d_node,
             remote_block_ids=block_ids,
@@ -584,3 +585,13 @@ class NixlConnectorScheduler:
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             remote_num_tokens=remote_num_tokens,
         )
+        # Thread the prefill-side cached-token count through to the decode
+        # side via kv_transfer_params, so user-facing usage reporting can
+        # surface the actual number of tokens that hit the prefix cache here.
+        # prefill_stats is still set at request_finished time (take_prefill_stats
+        # runs later, when the EngineCoreOutput is built).
+        if request.prefill_stats is not None:
+            kv_transfer_params[PREFILL_NUM_CACHED_TOKENS_KEY] = (
+                request.prefill_stats.num_cached_tokens
+            )
+        return delay_free_blocks, kv_transfer_params
