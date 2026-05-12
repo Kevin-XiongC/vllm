@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from fastapi import Request
 
+from vllm import envs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -222,6 +223,73 @@ class OpenAIServingChat(OpenAIServing):
 
         return await self.openai_serving_render.render_chat(request)
 
+    def _validate_kimi_params(
+        self,
+        request: ChatCompletionRequest,
+    ) -> ErrorResponse | None:
+        """Validate Kimi chat params and materialize Kimi defaults."""
+        if not envs.NOVITA_ENABLE_KIMI_VALIDATIONS:
+            return None
+
+        is_thinking = True
+        if request.chat_template_kwargs:
+            kwargs = request.chat_template_kwargs
+            if "thinking" in kwargs:
+                is_thinking = bool(kwargs["thinking"])
+            elif "enable_thinking" in kwargs:
+                is_thinking = bool(kwargs["enable_thinking"])
+
+        expected_temperature = 1.0 if is_thinking else 0.6
+        expected_top_p = 0.95
+        expected_presence_penalty = 0.0
+        expected_frequency_penalty = 0.0
+        expected_n = 1
+
+        errors: list[str] = []
+
+        if request.temperature is not None and not (0.0 <= request.temperature <= 1.0):
+            errors.append(
+                "temperature must be between 0 and 1 (inclusive), "
+                f"got {request.temperature}"
+            )
+        if request.top_p is not None and request.top_p != expected_top_p:
+            errors.append(f"top_p must be {expected_top_p}, got {request.top_p}")
+        if (
+            request.presence_penalty is not None
+            and request.presence_penalty != expected_presence_penalty
+        ):
+            errors.append(
+                f"presence_penalty must be {expected_presence_penalty}, "
+                f"got {request.presence_penalty}"
+            )
+        if (
+            request.frequency_penalty is not None
+            and request.frequency_penalty != expected_frequency_penalty
+        ):
+            errors.append(
+                f"frequency_penalty must be {expected_frequency_penalty}, "
+                f"got {request.frequency_penalty}"
+            )
+        if request.n is not None and request.n != expected_n:
+            errors.append(f"n must be {expected_n}, got {request.n}")
+
+        if errors:
+            return self.create_error_response(
+                f"Invalid parameters for Kimi model: {'; '.join(errors)}"
+            )
+
+        if request.temperature is None:
+            request.temperature = expected_temperature
+        if request.top_p is None:
+            request.top_p = expected_top_p
+
+        if request.chat_template_kwargs is None:
+            request.chat_template_kwargs = {}
+        request.chat_template_kwargs.setdefault("thinking", is_thinking)
+        request.chat_template_kwargs.setdefault("enable_thinking", is_thinking)
+
+        return None
+
     async def create_chat_completion(
         self,
         request: ChatCompletionRequest,
@@ -234,6 +302,11 @@ class OpenAIServingChat(OpenAIServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        if self.tool_call_id_type == "kimi_k2":
+            kimi_error = self._validate_kimi_params(request)
+            if kimi_error is not None:
+                return kimi_error
+
         return await self._with_kv_transfer_rejection_cleanup(
             self._create_chat_completion(request, raw_request), request, raw_request
         )

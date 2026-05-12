@@ -13,6 +13,8 @@ from tests.tool_parsers.utils import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
+    FunctionDefinition,
 )
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
@@ -459,32 +461,81 @@ class TestStreamingEdgeCases:
 
 
 class TestAdjustRequest:
-    def test_sets_skip_special_tokens_false(self, parser):
+    @staticmethod
+    def _parser():
+        tokenizer = MagicMock()
+        tokenizer.get_vocab.return_value = {}
+        return KimiK2ToolParser(tokenizer)
+
+    def test_sets_skip_special_tokens_false(self):
+        parser = self._parser()
         request = MagicMock(spec=ChatCompletionRequest)
-        request.tools = [{"type": "function", "function": {"name": "test"}}]
+        request.tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(
+                    name="get_weather",
+                    parameters={
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                ),
+            )
+        ]
         request.tool_choice = "auto"
         request.skip_special_tokens = True
+        request.structured_outputs = None
 
         result = parser.adjust_request(request)
         assert result.skip_special_tokens is False
+        assert result.structured_outputs is not None
+        structural_tag = json.loads(result.structured_outputs.structural_tag)
+        first_tag = structural_tag["format"]["tags"][0]
+        assert first_tag["begin"] == "<|tool_call_begin|>functions.get_weather"
+        assert first_tag["content"]["elements"][2]["json_schema"] == {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+        }
 
-    def test_no_change_when_tool_choice_none(self, parser):
+    def test_preserves_existing_structured_outputs(self):
+        parser = self._parser()
+        request = MagicMock(spec=ChatCompletionRequest)
+        request.tools = [
+            ChatCompletionToolsParam(
+                type="function",
+                function=FunctionDefinition(name="get_weather"),
+            )
+        ]
+        request.tool_choice = "auto"
+        request.skip_special_tokens = True
+        request.structured_outputs = object()
+
+        result = parser.adjust_request(request)
+        assert result.structured_outputs is request.structured_outputs
+
+    def test_no_change_when_tool_choice_none(self):
+        parser = self._parser()
         request = MagicMock(spec=ChatCompletionRequest)
         request.tools = [{"type": "function", "function": {"name": "test"}}]
         request.tool_choice = "none"
         request.skip_special_tokens = True
+        request.structured_outputs = None
 
         result = parser.adjust_request(request)
         assert result.skip_special_tokens is True
+        assert result.structured_outputs is None
 
-    def test_no_change_when_no_tools(self, parser):
+    def test_no_change_when_no_tools(self):
+        parser = self._parser()
         request = MagicMock(spec=ChatCompletionRequest)
         request.tools = None
         request.tool_choice = "auto"
         request.skip_special_tokens = True
+        request.structured_outputs = None
 
         result = parser.adjust_request(request)
         assert result.skip_special_tokens is True
+        assert result.structured_outputs is None
 
 
 def _chunk_tokenized_deltas(tokenizer, text: str, stream_interval: int) -> list[str]:

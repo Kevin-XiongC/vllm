@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Sequence
+from typing import Any, cast
 
 import regex as re
+from openai.types.responses.function_tool import FunctionTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -18,6 +21,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
@@ -68,7 +72,76 @@ class KimiK2ToolParser(ToolParser):
             # Ensure special-token markers appear as literal text in
             # current_text so we can do pure text-based parsing.
             request.skip_special_tokens = False
+        if (
+            request.structured_outputs is None
+            and request.tools
+            and request.tool_choice in ("auto", None)
+        ):
+            structural_tag = self._build_structural_tag(request.tools)
+            if structural_tag is not None:
+                request.structured_outputs = StructuredOutputsParams(
+                    structural_tag=structural_tag
+                )
         return request
+
+    @staticmethod
+    def _get_tool_name_and_parameters(
+        tool: Tool,
+    ) -> tuple[str, dict[str, Any] | None] | None:
+        if hasattr(tool, "function"):
+            return tool.function.name, tool.function.parameters
+        if isinstance(tool, FunctionTool):
+            return tool.name, cast(dict[str, Any] | None, tool.parameters)
+        return None
+
+    def _build_structural_tag(self, tools: list[Tool]) -> str | None:
+        tags: list[dict[str, Any]] = []
+        for tool in tools:
+            tool_info = self._get_tool_name_and_parameters(tool)
+            if tool_info is None:
+                continue
+            name, parameters = tool_info
+            parameters = parameters or {"type": "object", "properties": {}}
+            tags.append(
+                {
+                    "type": "tag",
+                    "begin": f"{self.tool_call_start_token}functions.{name}",
+                    "content": {
+                        "type": "sequence",
+                        "elements": [
+                            {
+                                "type": "regex",
+                                "pattern": r":\d+",
+                            },
+                            {
+                                "type": "const_string",
+                                "value": self.tool_call_arg_token,
+                            },
+                            {
+                                "type": "json_schema",
+                                "json_schema": parameters,
+                            },
+                        ],
+                    },
+                    "end": self.tool_call_end_token,
+                }
+            )
+
+        if not tags:
+            return None
+
+        return json.dumps(
+            {
+                "type": "structural_tag",
+                "format": {
+                    "type": "triggered_tags",
+                    "triggers": [self.tool_call_start_token],
+                    "tags": tags,
+                    "at_least_one": False,
+                    "stop_after_first": False,
+                },
+            }
+        )
 
     def extract_tool_calls(
         self,

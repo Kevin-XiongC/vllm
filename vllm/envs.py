@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     VLLM_PORT: int | None = None
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
+    NOVITA_ENABLE_KIMI_VALIDATIONS: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
@@ -594,6 +595,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # note that the value is true or false, not numbers
     "VLLM_USE_MODELSCOPE": lambda: (
         os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true"
+    ),
+    # If set, enable Novita-specific Kimi request validations.
+    "NOVITA_ENABLE_KIMI_VALIDATIONS": lambda: bool(
+        int(os.getenv("NOVITA_ENABLE_KIMI_VALIDATIONS", "0"))
     ),
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
@@ -1874,6 +1879,7 @@ def compile_factors() -> dict[str, object]:
 
     ignored_factors: set[str] = {
         "MAX_JOBS",
+        "NOVITA_ENABLE_KIMI_VALIDATIONS",
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",

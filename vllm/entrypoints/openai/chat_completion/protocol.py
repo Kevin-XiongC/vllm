@@ -13,6 +13,7 @@ from openai.types.chat.chat_completion_audio import (
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
 from pydantic import Field, PrivateAttr, model_serializer, model_validator
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import (
@@ -426,6 +427,62 @@ class ChatCompletionRequest(OpenAIBaseModel):
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
                 msg["tool_calls"] = list(tool_calls)
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_interleaved_thinking(cls, data: Any) -> Any:
+        """Require reasoning for Kimi interleaved-thinking tool-result turns.
+
+        When Kimi thinking is explicitly enabled, an assistant message with
+        tool calls must preserve the reasoning that led to those calls before
+        subsequent tool result messages are rendered back into the prompt.
+        """
+        if not envs.NOVITA_ENABLE_KIMI_VALIDATIONS:
+            return data
+
+        if not isinstance(data, dict):
+            return data
+
+        chat_template_kwargs = data.get("chat_template_kwargs") or {}
+        if not chat_template_kwargs.get("thinking"):
+            return data
+
+        messages = data.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return data
+
+        last = messages[-1]
+        last_role = (
+            last.get("role") if isinstance(last, dict) else getattr(last, "role", None)
+        )
+        if last_role != "tool":
+            return data
+
+        for msg in reversed(messages[:-1]):
+            role = (
+                msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+            )
+            if role == "tool":
+                continue
+            if role == "assistant":
+                if isinstance(msg, dict):
+                    tool_calls = msg.get("tool_calls")
+                    reasoning = msg.get("reasoning") or msg.get("reasoning_content")
+                else:
+                    tool_calls = getattr(msg, "tool_calls", None)
+                    reasoning = getattr(msg, "reasoning", None) or getattr(
+                        msg, "reasoning_content", None
+                    )
+                if tool_calls and not reasoning:
+                    raise VLLMValidationError(
+                        "Interleaved thinking required: the assistant message "
+                        "preceding tool results must include `reasoning` or "
+                        "`reasoning_content` when tool_calls are present.",
+                        parameter="messages",
+                    )
+            break
+
         return data
 
     @model_validator(mode="after")
