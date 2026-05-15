@@ -53,11 +53,25 @@ REQS_PER_LOGITPROC = 50
 STR_NO_LOGITPROC = "none"
 # Thinking budget uses ``ThinkingBudgetStateHolder`` (not a logits processor).
 STR_THINKING_BUDGET = "thinking_budget"
+# Reasoning logits processor is opt-in via ``custom_logitsprocs``; it needs a
+# configured reasoning parser + tokenizer, both mocked below.
+STR_REASONING = "reasoning"
+REASONING_LP_FQCN = "vllm.v1.sample.logits_processor.builtin:ReasoningLogitsProcessor"
 
 # Thinking token budget testing constants
 THINKING_TOKEN_BUDGET = 5
 THINK_START_TOKEN_ID = 999
 THINK_END_TOKEN_ID = 998
+
+# Reasoning logits processor testing constants. Picked outside the random
+# ``out_tokens`` range [1, 950] used by ``LogitsProcsRequestParams`` so
+# non-reasoning rows do not accidentally trigger reasoning state.
+REASONING_START_TOKEN_ID = 997
+REASONING_END_TOKEN_ID = 996
+# Models like Kimi K2 treat tool-section-start as an implicit reasoning end.
+REASONING_TOOL_SECTION_TOKEN_ID = 995
+# Special tokens that ``ReasoningLogitsProcessor`` must mask while reasoning.
+REASONING_BANNED_TOKEN_IDS = [994, 993]
 
 # LogitsProcessor subclass or "none"
 LogitprocType: TypeAlias = type[LogitsProcessor] | str
@@ -88,6 +102,10 @@ class LogitsProcsRequestParams:
             # Think-start seed for ``STR_THINKING_BUDGET`` rows.
             if logitproc_type == STR_THINKING_BUDGET:
                 self.out_tokens[0] = THINK_START_TOKEN_ID
+            # Reasoning-start seed for ``STR_REASONING`` rows so the per-row
+            # reasoning state is True at validation time.
+            if logitproc_type == STR_REASONING:
+                self.out_tokens[0] = REASONING_START_TOKEN_ID
         else:
             self.out_tokens = []
         self.prompt_tokens = []
@@ -105,6 +123,82 @@ class MockReasoningConfig:
     reasoning_start_token_ids = [THINK_START_TOKEN_ID]
     reasoning_end_token_ids = [THINK_END_TOKEN_ID]
     enabled = True
+
+
+class _MockReasoner:
+    """Stand-in for a ``ReasoningParser`` used by ``ReasoningLogitsProcessor``.
+
+    Exposes ``start_token_id`` / ``end_token_id`` and implements
+    ``is_reasoning_end`` like Kimi K2, treating both the explicit end token
+    and the tool-section-start token as a reasoning terminator.
+    """
+
+    def __init__(self, tokenizer=None):
+        self._start_token_id = REASONING_START_TOKEN_ID
+        self._end_token_id = REASONING_END_TOKEN_ID
+        self._tool_section_start_token_id = REASONING_TOOL_SECTION_TOKEN_ID
+
+    @property
+    def start_token_id(self) -> int:
+        return self._start_token_id
+
+    @property
+    def end_token_id(self) -> int:
+        return self._end_token_id
+
+    def is_reasoning_end(self, input_ids):
+        for tok in input_ids:
+            if tok == self._end_token_id:
+                return True
+            if tok == self._tool_section_start_token_id:
+                return True
+        return False
+
+
+class _MockTokenizerForReasoning:
+    """Minimal tokenizer-like object that exposes the special ids the
+    reasoning logits processor probes during ``_init_token_ids``.
+    """
+
+    all_special_ids = [
+        REASONING_START_TOKEN_ID,
+        REASONING_END_TOKEN_ID,
+        REASONING_TOOL_SECTION_TOKEN_ID,
+        *REASONING_BANNED_TOKEN_IDS,
+    ]
+    added_tokens_encoder: dict[str, int] = {}
+
+
+class _MockModelConfigForReasoning:
+    """Just enough to satisfy ``_init_token_ids``'s ``model_config`` reads."""
+
+    skip_tokenizer_init = False
+
+
+def _install_reasoning_mocks(vllm_config: VllmConfig) -> None:
+    """Wire up the dependencies needed to instantiate ReasoningLogitsProcessor.
+
+    - Set ``structured_outputs_config.reasoning_parser`` so ``_init_token_ids``
+      does not early-return.
+    - Inject a non-None ``model_config`` so the tokenizer probe runs.
+    - Patch ``ReasoningParserManager.get_reasoning_parser`` and
+      ``cached_tokenizer_from_config`` to return the mocks defined above.
+
+    Safe to call unconditionally inside ``@create_new_process_for_each_test``
+    subprocesses since each test gets a fresh interpreter.
+    """
+    import vllm.reasoning as reasoning_pkg
+    import vllm.tokenizers as tokenizers_pkg
+
+    vllm_config.structured_outputs_config.reasoning_parser = "kimi_k2"
+    if vllm_config.model_config is None:
+        vllm_config.model_config = _MockModelConfigForReasoning()
+    reasoning_pkg.ReasoningParserManager.get_reasoning_parser = (
+        lambda name: _MockReasoner
+    )
+    tokenizers_pkg.cached_tokenizer_from_config = (
+        lambda model_config: _MockTokenizerForReasoning()
+    )
 
 
 def _generate_fake_sampling_metadata(
@@ -128,12 +222,14 @@ def _generate_fake_sampling_metadata(
 
     vllm_config = VllmConfig()
     vllm_config.reasoning_config = MockReasoningConfig()
+    _install_reasoning_mocks(vllm_config)
 
     logitsprocs = build_logitsprocs(
         vllm_config=vllm_config,
         device=device,
         is_pin_memory=PIN_MEMORY_AVAILABLE,
         is_pooling_model=False,
+        custom_logitsprocs=[REASONING_LP_FQCN],
     )
     num_spec = (
         vllm_config.speculative_config.num_speculative_tokens
@@ -542,6 +638,95 @@ def _thinking_budget_validate(
                     )
 
 
+def _reasoning_params(kwargs: dict) -> None:
+    """``ReasoningLogitsProcessor`` reads no SamplingParams fields."""
+
+
+def _reasoning_expected_state(out_tokens: list[int]) -> bool:
+    """Replay reasoning state transitions for a row's output tokens.
+
+    Mirrors ``ReasoningLogitsProcessor._check_reasoning_state``: scan the
+    full output, flip ``is_reasoning`` on start, flip off on any token in
+    the reasoning-end set (end token or implicit end).
+    """
+    reasoning_end_token_ids = {
+        REASONING_END_TOKEN_ID,
+        REASONING_TOOL_SECTION_TOKEN_ID,
+    }
+    is_reasoning = False
+    for tok in out_tokens:
+        if tok == REASONING_START_TOKEN_ID:
+            is_reasoning = True
+        elif tok in reasoning_end_token_ids:
+            is_reasoning = False
+    return is_reasoning
+
+
+def _reasoning_validate(
+    test_fakes: LogitsprocsTestFakes,
+    persistent_batch: list[LogitsProcsRequestParams],
+    logits_new: torch.Tensor,
+    batch_index: int,
+    request_params: LogitsProcsRequestParams,
+    step_idx: int,
+) -> None:
+    """Validate ``ReasoningLogitsProcessor`` masking behavior for one row.
+
+    - When the row is in reasoning state (start seen, end not yet), every
+      banned special token must have its logit driven to -inf.
+    - Otherwise every banned token must keep its original logit.
+    - The non-banned token columns must be untouched either way.
+    """
+    logits_old = test_fakes.logits[persistent_batch[batch_index].workload_index].cpu()
+    row_new = logits_new[batch_index].cpu()
+    is_reasoning = _reasoning_expected_state(request_params.out_tokens)
+
+    for token_id in REASONING_BANNED_TOKEN_IDS:
+        old_value = float(logits_old[token_id])
+        new_value = float(row_new[token_id])
+        if is_reasoning:
+            if new_value != float("-inf"):
+                _raise_error_invalid(
+                    msg_suffix=(
+                        f"Reasoning row: banned token {token_id} logit "
+                        f"{new_value} expected -inf"
+                    ),
+                    batch_index=batch_index,
+                    request_params=request_params,
+                    step_idx=step_idx,
+                )
+        else:
+            if new_value != pytest.approx(old_value):
+                _raise_error_invalid(
+                    msg_suffix=(
+                        f"Non-reasoning row: banned token {token_id} logit "
+                        f"{new_value} should match original {old_value}"
+                    ),
+                    batch_index=batch_index,
+                    request_params=request_params,
+                    step_idx=step_idx,
+                )
+
+    # Non-banned column sanity: pick a couple of unaffected ids and assert
+    # they were untouched by the reasoning processor regardless of state.
+    untouched_token_ids = [1, 500, 800]
+    for token_id in untouched_token_ids:
+        if token_id in REASONING_BANNED_TOKEN_IDS:
+            continue
+        old_value = float(logits_old[token_id])
+        new_value = float(row_new[token_id])
+        if new_value != pytest.approx(old_value):
+            _raise_error_invalid(
+                msg_suffix=(
+                    f"Reasoning row: untouched token {token_id} logit "
+                    f"{new_value} should match original {old_value}"
+                ),
+                batch_index=batch_index,
+                request_params=request_params,
+                step_idx=step_idx,
+            )
+
+
 def _none_validate(
     test_fakes: LogitsprocsTestFakes,
     persistent_batch: list[LogitsProcsRequestParams],
@@ -591,6 +776,9 @@ logitsprocs_test_mapping = {
     STR_THINKING_BUDGET: LogitsprocTestHelpers(
         gen_request_fxn=_thinking_budget_params, eval_fxn=_thinking_budget_validate
     ),
+    STR_REASONING: LogitsprocTestHelpers(
+        gen_request_fxn=_reasoning_params, eval_fxn=_reasoning_validate
+    ),
 }
 
 
@@ -600,8 +788,11 @@ def _get_test_cases() -> list[list[str]]:
 
     # Isolate thinking-budget handling from other processors to avoid cross-talk.
     thinking_id: LogitprocType = STR_THINKING_BUDGET
+    reasoning_id: LogitprocType = STR_REASONING
     other_processors = [
-        p for p in logitsprocs_types if p != STR_NO_LOGITPROC and p != thinking_id
+        p
+        for p in logitsprocs_types
+        if p != STR_NO_LOGITPROC and p != thinking_id and p != reasoning_id
     ]
 
     return (
@@ -609,6 +800,8 @@ def _get_test_cases() -> list[list[str]]:
         + [[logitproc_type, STR_NO_LOGITPROC] for logitproc_type in other_processors]
         + [other_processors]
         + [[thinking_id]]
+        + [[reasoning_id, STR_NO_LOGITPROC]]
+        + [other_processors + [reasoning_id]]
     )
 
 
