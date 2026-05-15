@@ -752,8 +752,56 @@ class NixlConnectorWorker:
         # Forwarding a real layer name rather than a synthetic key
         self.register_kv_caches({first_layer: kv_cache})
 
+    def _filter_kv_caches_to_target_layers(
+        self, kv_caches: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        """Drop any layer that does not belong to the target model.
+
+        Motivation: under speculative decoding with a separate draft model
+        the engine hands ``register_kv_caches`` a dict that contains both
+        target and draft layer caches. Registering the draft entries with
+        NIXL pollutes the remote engine's view of cache geometry (extra
+        layers in the descriptor list, broken per-stage routing under PP).
+
+        Authoritative target set: ``self._layer_specs`` is built from
+        ``kv_cache_config.kv_cache_groups[*].layer_names`` (the engine
+        populates it scoped to the target model per PP rank). Membership
+        test is correct on every PP rank and under any draft-naming
+        convention (Eagle/MTP/etc.), with no integer-index arithmetic.
+
+        Applied uniformly regardless of ``speculative_config`` so that an
+        unexpected non-target key surfaces the same way in every code
+        path -- silent acceptance was confusing in earlier drafts.
+        ``register_cross_layers_kv_caches`` is unaffected because it
+        forwards ``next(iter(self._layer_specs))``, which is by
+        construction a target-model layer name.
+        """
+        target_layer_names = set(self._layer_specs)
+        filtered: dict[str, torch.Tensor] = {}
+        dropped: list[str] = []
+        for name, cache in kv_caches.items():
+            if name in target_layer_names:
+                filtered[name] = cache
+            else:
+                dropped.append(name)
+                logger.debug(
+                    "Skipping non-target KV cache layer %s from NIXL"
+                    " registration (not in target model's _layer_specs)",
+                    name,
+                )
+        if dropped:
+            logger.info(
+                "NIXL registration skipped %d non-target KV cache layer(s)"
+                " (sample: %s). This is expected under speculative decoding"
+                " with a separate draft model; unexpected otherwise.",
+                len(dropped),
+                dropped[:3],
+            )
+        return filtered
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+        kv_caches = self._filter_kv_caches_to_target_layers(kv_caches)
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,
