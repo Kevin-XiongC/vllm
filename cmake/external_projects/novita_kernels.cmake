@@ -5,6 +5,7 @@ message(STATUS "Building Novita kernels for archs: ${CUDA_ARCHS}")
 
 set(NOVITA_SRCS
     "${CMAKE_CURRENT_SOURCE_DIR}/csrc/novita/fused_rope_fp8_kvstore_kernel.cu"
+    "${CMAKE_CURRENT_SOURCE_DIR}/csrc/novita/kimi_k2_moe_gate.cu"
     "${CMAKE_CURRENT_SOURCE_DIR}/csrc/novita/torch_bindings.cpp")
 
 set(NOVITA_GPU_FLAGS ${VLLM_GPU_FLAGS})

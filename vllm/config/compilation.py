@@ -141,6 +141,9 @@ class PassConfig:
     enable_rope_fp8_kvstore_fusion: bool = False
     """Use novita's fused RoPE + FP8 cast + KV store kernel for minimax_m2.
     Requires _novita_C to be built and the model to use FP8 KV cache."""
+    enable_kimi_k2_moe_gate_fusion: bool = True
+    """Use novita's fused Kimi K2 MoE gate kernel when the router shape matches.
+    Requires _novita_C to be built; falls back to the standard router otherwise."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
     """Enable fused MLA KV cache update with RoPE."""
 

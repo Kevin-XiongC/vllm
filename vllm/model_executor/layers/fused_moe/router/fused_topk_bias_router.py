@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     get_routing_method_type,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.platforms import current_platform
 
 
 def vllm_topk_softmax(
@@ -96,6 +97,62 @@ def _aiter_get_num_expert_group(num_experts: int) -> int:
     return g
 
 
+def should_use_novita_kimi_k2_moe_gate(
+    gating_output: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    topk: int,
+    scoring_func: str,
+) -> bool:
+    if not current_platform.is_cuda():
+        return False
+    if scoring_func != "sigmoid":
+        return False
+    if topk <= 0 or topk > 8:
+        return False
+    if gating_output.dim() != 2 or gating_output.shape[-1] != 384:
+        return False
+    if e_score_correction_bias.dim() != 1 or e_score_correction_bias.shape[0] != 384:
+        return False
+    if gating_output.dtype != torch.float32:
+        return False
+    if e_score_correction_bias.dtype != torch.float32:
+        return False
+    if not gating_output.is_contiguous() or not e_score_correction_bias.is_contiguous():
+        return False
+
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return False
+    if not vllm_config.compilation_config.pass_config.enable_kimi_k2_moe_gate_fusion:
+        return False
+
+    from vllm.novita_ops import is_novita_available
+
+    return is_novita_available()
+
+
+def novita_kimi_k2_moe_fused_gate(
+    gating_output: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    routed_scaling_factor: float,
+    apply_routed_scaling_factor_on_output: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    import vllm.novita_ops  # noqa: F401
+
+    return torch.ops.vllm.novita_kimi_k2_moe_fused_gate(
+        gating_output,
+        e_score_correction_bias,
+        topk,
+        renormalize,
+        routed_scaling_factor,
+        apply_routed_scaling_factor_on_output,
+    )
+
+
 def fused_topk_bias(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -112,6 +169,21 @@ def fused_topk_bias(
         assert hidden_states.size(0) == gating_output.size(0), (
             "Number of tokens mismatch"
         )
+
+        if should_use_novita_kimi_k2_moe_gate(
+            gating_output,
+            e_score_correction_bias,
+            topk,
+            scoring_func,
+        ):
+            return novita_kimi_k2_moe_fused_gate(
+                gating_output,
+                e_score_correction_bias,
+                topk,
+                renormalize,
+                1.0,
+                False,
+            )
 
         M, _ = hidden_states.size()
 

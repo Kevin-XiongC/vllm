@@ -44,6 +44,13 @@ def register_novita_ops() -> None:
         fake_impl=novita_fused_rope_fp8_kvstore_fake,
     )
 
+    direct_register_custom_op(
+        op_name="novita_kimi_k2_moe_fused_gate",
+        op_func=novita_kimi_k2_moe_fused_gate,
+        mutates_args=[],
+        fake_impl=novita_kimi_k2_moe_fused_gate_fake,
+    )
+
 
 # ---------------------------------------------------------------------------
 # Custom op: novita_fused_rope_fp8_kvstore
@@ -177,6 +184,47 @@ def novita_fused_rope_fp8_kvstore_fake(
     rotary_dim: int,
 ) -> None:
     return
+
+
+# ---------------------------------------------------------------------------
+# Custom op: novita_kimi_k2_moe_fused_gate
+#
+# Kimi K2 MoE fused gate from SGLang:
+#   sigmoid(router_logits) + expert bias for top-k selection
+#   unbiased sigmoid(router_logits) for output weights
+# ---------------------------------------------------------------------------
+
+
+def novita_kimi_k2_moe_fused_gate(
+    input: torch.Tensor,
+    bias: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    routed_scaling_factor: float,
+    apply_routed_scaling_factor_on_output: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._novita_C.kimi_k2_moe_fused_gate(
+        input,
+        bias,
+        topk,
+        renormalize,
+        routed_scaling_factor,
+        apply_routed_scaling_factor_on_output,
+    )
+
+
+def novita_kimi_k2_moe_fused_gate_fake(
+    input: torch.Tensor,
+    bias: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    routed_scaling_factor: float,
+    apply_routed_scaling_factor_on_output: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+        torch.empty((input.shape[0], topk), dtype=torch.float32, device=input.device),
+        torch.empty((input.shape[0], topk), dtype=torch.int32, device=input.device),
+    )
 
 
 if _novita_available:

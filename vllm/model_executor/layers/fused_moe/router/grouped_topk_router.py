@@ -20,6 +20,8 @@ from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
+    novita_kimi_k2_moe_fused_gate,
+    should_use_novita_kimi_k2_moe_gate,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.utils import maybe_disable_graph_partition
@@ -312,9 +314,9 @@ class GroupedTopKRouter(BaseRouter):
                     e_score_correction_bias=self.e_score_correction_bias.data,
                     topk=self.top_k,
                     renormalize=self.renormalize,
+                    indices_type=indices_type,
+                    routed_scaling_factor=self.routed_scaling_factor,
                 )
-                if self.routed_scaling_factor != 1.0:
-                    topk_weights *= self.routed_scaling_factor
             else:
                 topk_weights, topk_ids, token_expert_indices = fused_topk(
                     hidden_states=hidden_states,
@@ -324,6 +326,25 @@ class GroupedTopKRouter(BaseRouter):
                     indices_type=indices_type,
                 )
             return topk_weights, topk_ids
+
+        if (
+            self.e_score_correction_bias is not None
+            and self.num_expert_group == 1
+            and should_use_novita_kimi_k2_moe_gate(
+                router_logits,
+                self.e_score_correction_bias,
+                self.top_k,
+                self.scoring_func,
+            )
+        ):
+            return novita_kimi_k2_moe_fused_gate(
+                router_logits,
+                self.e_score_correction_bias,
+                self.top_k,
+                self.renormalize,
+                self.routed_scaling_factor,
+                True,
+            )
 
         # Select grouped_topk implementation
         if rocm_aiter_ops.is_fused_moe_enabled():

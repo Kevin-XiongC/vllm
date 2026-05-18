@@ -16,6 +16,12 @@ void fused_rope_fp8_kvstore(torch::Tensor& q, torch::Tensor& k,
                             torch::Tensor& slot_mapping, torch::Tensor& k_scale,
                             torch::Tensor& v_scale);
 
+// Kimi K2 MoE fused gate (from SGLang)
+std::tuple<torch::Tensor, torch::Tensor> kimi_k2_moe_fused_gate(
+    const torch::Tensor& input, const torch::Tensor& bias, int64_t topk,
+    bool renormalize, double routed_scaling_factor,
+    bool apply_routed_scaling_factor_on_output);
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "fused_rope_fp8_kvstore(Tensor! q, Tensor! k, Tensor! v, bool is_neox, "
@@ -24,6 +30,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor! k_cache, Tensor! v_cache, "
       "Tensor slot_mapping, Tensor k_scale, Tensor v_scale) -> ()");
   ops.impl("fused_rope_fp8_kvstore", torch::kCUDA, &fused_rope_fp8_kvstore);
+
+  ops.def(
+      "kimi_k2_moe_fused_gate(Tensor input, Tensor bias, int topk, "
+      "bool renormalize, float routed_scaling_factor, "
+      "bool apply_routed_scaling_factor_on_output) -> (Tensor, Tensor)");
+  ops.impl("kimi_k2_moe_fused_gate", torch::kCUDA, &kimi_k2_moe_fused_gate);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

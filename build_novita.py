@@ -49,6 +49,7 @@ setup(
             name="vllm._novita_C",
             sources=[
                 os.path.join(ROOT, "csrc/novita/fused_rope_fp8_kvstore_kernel.cu"),
+                os.path.join(ROOT, "csrc/novita/kimi_k2_moe_gate.cu"),
                 os.path.join(ROOT, "csrc/novita/torch_bindings.cpp"),
             ],
             include_dirs=[
