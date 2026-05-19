@@ -166,6 +166,75 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
             logits[self.logits_slice] += self.bias_tensor
         return logits
 
+    def apply_with_spec_decode(
+        self,
+        logits: torch.Tensor,
+        num_draft_tokens: list[int],
+    ) -> torch.Tensor:
+        """Speculative decoding version of apply().
+
+        ``logits`` has shape ``[sum(num_draft_tokens), vocab_size]``; the bias
+        for each request must be added to every draft-token row belonging to
+        that request.
+
+        Example: ``num_draft_tokens = [2, 3, 1]`` -> logits shape ``[6, V]``,
+        ``cumsum = [0, 2, 5, 6]`` -> req 0 -> rows 0-1, req 1 -> rows 2-4,
+        req 2 -> row 5.
+        """
+        if not self.biases:
+            return logits
+
+        num_draft_arr = np.array(num_draft_tokens, dtype=np.int64)
+        cumsum = np.concatenate([[0], np.cumsum(num_draft_arr)])
+        vocab_size = logits.shape[-1]
+
+        all_rows: list[np.ndarray] = []
+        all_toks: list[np.ndarray] = []
+        all_biases: list[np.ndarray] = []
+
+        for req_idx, bias_dict in self.biases.items():
+            n_draft = int(num_draft_arr[req_idx])
+            if n_draft == 0:
+                continue
+
+            invalid_tok_ids = [
+                tid for tid in bias_dict if tid >= vocab_size or tid < -vocab_size
+            ]
+            if invalid_tok_ids:
+                raise IndexError(
+                    "logit_bias token id(s) out of bounds for speculative "
+                    f"decode vocab size {vocab_size}: {invalid_tok_ids}"
+                )
+
+            tok_ids = list(bias_dict)
+            bias_vals = list(bias_dict.values())
+            if not tok_ids:
+                continue
+
+            offset = int(cumsum[req_idx])
+            n_bias = len(tok_ids)
+            row_indices = np.arange(offset, offset + n_draft, dtype=np.int64)
+            all_rows.append(np.repeat(row_indices, n_bias))
+            all_toks.append(np.tile(tok_ids, n_draft))
+            all_biases.append(np.tile(bias_vals, n_draft))
+
+        if all_rows:
+            rows_np = np.concatenate(all_rows)
+            toks_np = np.concatenate(all_toks)
+            biases_np = np.concatenate(all_biases).astype(np.float32)
+            # Route through pin-memory aware host->device transfers so the
+            # speculative-decode hot path actually gets non-blocking behavior
+            # when ``is_pin_memory=True`` (torch.from_numpy returns an
+            # unpinned tensor and would silently fall back to sync copies).
+            logits_slice = (
+                self._device_tensor(rows_np.tolist(), torch.int64),
+                self._device_tensor(toks_np.tolist(), torch.int64),
+            )
+            bias_tensor = self._device_tensor(biases_np.tolist(), torch.float32)
+            logits.index_put_(logits_slice, bias_tensor, accumulate=True)
+
+        return logits
+
 
 class MinTokensLogitsProcessor(LogitsProcessor):
     def __init__(
@@ -533,4 +602,31 @@ class ReasoningLogitsProcessor(LogitsProcessor):
                 self.reasoning_indices_tensor[:, None],
                 self.banned_token_ids_tensor[None, :],
             ] = -float("inf")
+        return logits
+
+    def apply_with_spec_decode(
+        self,
+        logits: torch.Tensor,
+        num_draft_tokens: list[int],
+    ) -> torch.Tensor:
+        if not self.has_reasoning:
+            return logits
+
+        num_draft_arr = np.array(num_draft_tokens, dtype=np.int64)
+        cumsum = np.concatenate([[0], np.cumsum(num_draft_arr)])
+
+        all_rows: list[int] = []
+        for index, (_, is_reasoning, _) in self.req_states.items():
+            if is_reasoning:
+                offset = int(cumsum[index])
+                n_draft = int(num_draft_arr[index])
+                all_rows.extend(range(offset, offset + n_draft))
+
+        if all_rows:
+            row_tensor = self._device_tensor(all_rows, torch.int64)
+            logits[
+                row_tensor[:, None],
+                self.banned_token_ids_tensor[None, :],
+            ] = -float("inf")
+
         return logits

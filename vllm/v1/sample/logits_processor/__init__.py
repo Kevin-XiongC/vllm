@@ -42,7 +42,8 @@ STR_POOLING_REJECTS_LOGITSPROCS = (
 # Error message when the user tries to initialize vLLM with a speculative
 # decoding enabled and custom logitsproces
 STR_SPEC_DEC_REJECTS_LOGITSPROCS = (
-    "Custom logits processors are not supported when speculative decoding is enabled."
+    "One or more custom logits processor(s) are not supported"
+    " under speculative decoding."
 )
 
 LOGITSPROCS_GROUP = "vllm.logits_processors"
@@ -52,6 +53,23 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
 ]
+
+# Builtin logits processors that have an ``apply_with_spec_decode`` method
+# and can therefore be passed via ``custom_logitsprocs`` even when
+# speculative decoding is enabled. Anything outside this list still raises
+# ``STR_SPEC_DEC_REJECTS_LOGITSPROCS`` in the spec-decode branch of
+# ``build_logitsprocs``.
+SPEC_DECODE_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
+    MinTokensLogitsProcessor,
+    LogitBiasLogitsProcessor,
+    ReasoningLogitsProcessor,
+]
+
+SPEC_DECODE_LOGIT_BIAS_REQUIRED_MSG = (
+    "The logit_bias sampling parameter is only supported with speculative "
+    "decoding when LogitBiasLogitsProcessor is configured via "
+    "`logits_processors` / `custom_logitsprocs`."
+)
 
 
 def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
@@ -182,6 +200,26 @@ def _load_custom_logitsprocs(
     return _load_logitsprocs_plugins() + _load_logitsprocs_by_fqcns(logits_processors)
 
 
+@lru_cache
+def _cached_spec_decode_logit_bias_supported(
+    logits_processors: tuple[str | type[LogitsProcessor], ...] | None,
+) -> bool:
+    from vllm.platforms import current_platform
+
+    if current_platform.is_tpu():
+        return False
+    return LogitBiasLogitsProcessor in _load_logitsprocs_by_fqcns(logits_processors)
+
+
+def spec_decode_logit_bias_supported(
+    logits_processors: Sequence[str | type[LogitsProcessor]] | None,
+) -> bool:
+    logits_processors = (
+        tuple(logits_processors) if logits_processors is not None else None
+    )
+    return _cached_spec_decode_logit_bias_supported(logits_processors)
+
+
 def build_logitsprocs(
     vllm_config: "VllmConfig",
     device: torch.device,
@@ -200,13 +238,66 @@ def build_logitsprocs(
 
     # Check if speculative decoding is enabled.
     if vllm_config.speculative_config:
+        spec_decode_custom_classes: list[type[LogitsProcessor]] = []
         if custom_logitsprocs:
-            raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
-        logger.warning(
-            "min_p and logit_bias parameters won't work with speculative decoding."
-        )
+            from vllm.platforms import current_platform
+
+            if current_platform.is_tpu():
+                # Match _load_custom_logitsprocs: vLLM V1 on TPU does not
+                # support user-specified custom logits processors.
+                logger.warning(
+                    "Ignoring custom_logitsprocs under speculative decoding: "
+                    "TPU platform does not support user-specified custom "
+                    "logits processors."
+                )
+            else:
+                spec_decode_custom_classes = _load_logitsprocs_by_fqcns(
+                    custom_logitsprocs
+                )
+                unsupported_logitsprocs = [
+                    logitproc
+                    for logitproc in spec_decode_custom_classes
+                    if logitproc not in SPEC_DECODE_LOGITS_PROCESSORS
+                ]
+                if unsupported_logitsprocs:
+                    rejected = ", ".join(c.__name__ for c in unsupported_logitsprocs)
+                    supported = ", ".join(
+                        c.__name__ for c in SPEC_DECODE_LOGITS_PROCESSORS
+                    )
+                    raise ValueError(
+                        f"{STR_SPEC_DEC_REJECTS_LOGITSPROCS} "
+                        f"Rejected: {rejected}. "
+                        f"Supported under spec decode: {supported}."
+                    )
+        spec_decode_warnings = ["min_p won't work with speculative decoding."]
+        if LogitBiasLogitsProcessor not in spec_decode_custom_classes:
+            spec_decode_warnings.append(
+                "Pass LogitBiasLogitsProcessor via `custom_logitsprocs` to "
+                "enable logit_bias."
+            )
+        if ReasoningLogitsProcessor not in spec_decode_custom_classes:
+            spec_decode_warnings.append(
+                "Pass ReasoningLogitsProcessor via `custom_logitsprocs` to "
+                "enable reasoning-aware processing."
+            )
+        logger.warning(" ".join(spec_decode_warnings))
+        # Deduplicate while preserving order. Re-instantiating a stateful
+        # processor like LogitBias would apply biases twice on the same row;
+        # explicit ``MinTokensLogitsProcessor`` in custom_logitsprocs is
+        # collapsed into the implicit one we add up front.
+        spec_decode_candidates: list[type[LogitsProcessor]] = [
+            MinTokensLogitsProcessor,
+            *spec_decode_custom_classes,
+        ]
+        spec_decode_logitsprocs: list[type[LogitsProcessor]] = []
+        seen: set[type[LogitsProcessor]] = set()
+        for ctor in spec_decode_candidates:
+            if ctor in seen:
+                continue
+            seen.add(ctor)
+            spec_decode_logitsprocs.append(ctor)
         return LogitsProcessors(
-            [MinTokensLogitsProcessor(vllm_config, device, is_pin_memory)]
+            ctor(vllm_config, device, is_pin_memory) for ctor in spec_decode_logitsprocs
         )
 
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
@@ -353,7 +444,9 @@ __all__ = [
     "LogitsProcessors",
     "build_logitsprocs",
     "STR_POOLING_REJECTS_LOGITSPROCS",
+    "SPEC_DECODE_LOGIT_BIAS_REQUIRED_MSG",
     "LOGITSPROCS_GROUP",
     "AdapterLogitsProcessor",
     "ReasoningLogitsProcessor",
+    "spec_decode_logit_bias_supported",
 ]

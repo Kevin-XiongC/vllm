@@ -673,7 +673,7 @@ class SamplingParams(
         self._validate_logit_bias(model_config)
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
-        self._validate_spec_decode(speculative_config)
+        self._validate_spec_decode(model_config, speculative_config)
         self._validate_structured_outputs(structured_outputs_config, tokenizer)
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
@@ -779,17 +779,25 @@ class SamplingParams(
 
     def _validate_spec_decode(
         self,
+        model_config: ModelConfig,
         speculative_config: SpeculativeConfig | None,
     ) -> None:
         if speculative_config is None:
             return
 
-        # Some sampling parameters are not yet compatible with spec decoding.
-        if self.min_p > _SAMPLING_EPS or self.logit_bias:
+        if self.min_p > _SAMPLING_EPS:
             raise ValueError(
-                "The min_p and logit_bias sampling parameters "
-                "are not yet supported with speculative decoding."
+                "The min_p sampling parameter is not yet supported with "
+                "speculative decoding."
             )
+        if self.logit_bias:
+            from vllm.v1.sample.logits_processor import (
+                SPEC_DECODE_LOGIT_BIAS_REQUIRED_MSG,
+                spec_decode_logit_bias_supported,
+            )
+
+            if not spec_decode_logit_bias_supported(model_config.logits_processors):
+                raise ValueError(SPEC_DECODE_LOGIT_BIAS_REQUIRED_MSG)
 
     def _validate_structured_outputs(
         self,
