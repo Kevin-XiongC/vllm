@@ -32,16 +32,26 @@ def moe_fused_mul_sum_kernel(
     k_mask = offs_k < size
     mask = m_mask[:, None] & k_mask[None, :]
 
-    a_base = inputs_ptr + (offs_m * stride_m)[:, None] + offs_k[None, :]
-    b_base = topk_weights_ptr + offs_m * top_k
+    offs_m_i64 = offs_m.to(tl.int64)
+    offs_k_i64 = offs_k.to(tl.int64)
+
+    a_base = inputs_ptr + (offs_m_i64 * stride_m)[:, None] + offs_k_i64[None, :]
+    b_base = topk_weights_ptr + offs_m_i64 * top_k
 
     acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
 
     for n in tl.static_range(top_k):
         b_val = tl.load(b_base + n, mask=m_mask, other=0.0).to(tl.float32)
         if has_expert_map:
-            id_val = tl.load(top_ids_ptr + offs_m * top_k + n, mask=m_mask, other=0)
-            expert_mask = tl.load(expert_map_ptr + id_val) >= 0
+            id_val = tl.load(top_ids_ptr + offs_m_i64 * top_k + n, mask=m_mask, other=0)
+            valid_expert_id = id_val >= 0
+            safe_id_val = tl.where(valid_expert_id, id_val, 0)
+            mapped_expert_id = tl.load(
+                expert_map_ptr + safe_id_val,
+                mask=m_mask & valid_expert_id,
+                other=-1,
+            )
+            expert_mask = mapped_expert_id >= 0
             a_vec = tl.load(
                 a_base + n * size,
                 mask=mask & expert_mask[:, None],
@@ -55,7 +65,7 @@ def moe_fused_mul_sum_kernel(
             ).to(tl.float32)
         acc += a_vec * b_val[:, None]
 
-    out_ptrs = outputs_ptr + (offs_m * size)[:, None] + offs_k[None, :]
+    out_ptrs = outputs_ptr + (offs_m_i64 * size)[:, None] + offs_k_i64[None, :]
     tl.store(
         out_ptrs,
         acc.to(outputs_ptr.dtype.element_ty),

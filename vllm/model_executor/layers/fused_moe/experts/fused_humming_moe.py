@@ -52,11 +52,24 @@ def get_humming_moe_gemm_type() -> str:
         gemm_type = env_gemm_type
     elif env_gemm_type in ["grouped_contiguous", "grouped"]:
         gemm_type = "grouped_contiguous"
+    elif env_gemm_type not in ["", "auto"]:
+        logger.warning_once(
+            "Ignoring unsupported VLLM_HUMMING_MOE_GEMM_TYPE=%s. "
+            "Supported values are indexed, grouped, grouped_contiguous, and auto.",
+            env_gemm_type,
+        )
+        gemm_type = "grouped_contiguous" if _is_sm90_or_newer() else "indexed"
+    elif _is_sm90_or_newer():
+        gemm_type = "grouped_contiguous"
     else:
         gemm_type = "indexed"
 
     logger.info_once(f"Using {gemm_type} gemm for humming moe")  # noqa
     return gemm_type
+
+
+def _is_sm90_or_newer() -> bool:
+    return current_platform.is_cuda() and current_platform.has_device_capability(90)
 
 
 class HummingExpertsBase(mk.FusedMoEExpertsModular):

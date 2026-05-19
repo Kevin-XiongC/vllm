@@ -67,6 +67,9 @@
     "RUN_WHEEL_CHECK": {
       "default": "true"
     },
+    "SGL_KERNEL_VERSION": {
+      "default": "0.4.2"
+    },
     "FLASHINFER_VERSION": {
       "default": "0.6.11.post2"
     },

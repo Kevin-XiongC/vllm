@@ -655,15 +655,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
 # Install sgl-kernel early to fail fast (public release, no auth needed).
-# Only installed for CUDA 12.9 builds.
+# Only installed for CUDA versions with published wheels.
+ARG SGL_KERNEL_VERSION=0.4.2
 RUN --mount=type=cache,target=/root/.cache/uv \
-    SGL_KERNEL_WHL_URL="https://github.com/novitalabs/sglang/releases/download/0.4.1/sglang_kernel-0.4.1-cp310-abi3-linux_x86_64.whl" && \
     CUDA_VERSION_SHORT=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
-    if [ "$CUDA_VERSION_SHORT" != "129" ]; then \
-        echo "Skipping sgl-kernel: only installed for CUDA 12.9 (got ${CUDA_VERSION})"; \
+    if [ "$CUDA_VERSION_SHORT" != "129" ] && [ "$CUDA_VERSION_SHORT" != "130" ]; then \
+        echo "Skipping sgl-kernel: only installed for CUDA 12.9/13.0 (got ${CUDA_VERSION})"; \
         exit 0; \
     fi && \
-    uv pip install --system --no-deps "$SGL_KERNEL_WHL_URL"
+    SGL_KERNEL_WHL_URL="https://github.com/novitalabs/sglang/releases/download/${SGL_KERNEL_VERSION}/sglang_kernel-${SGL_KERNEL_VERSION}%2Bcu${CUDA_VERSION_SHORT}-cp310-abi3-linux_x86_64.whl" && \
+    uv pip install --system --no-deps "$SGL_KERNEL_WHL_URL" && \
+    uv pip install --system git+https://github.com/inclusionAI/humming.git
 
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html

@@ -1252,10 +1252,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_HUMMING_USE_F16_ACCUM": lambda: maybe_convert_bool(
         os.environ.get("VLLM_HUMMING_USE_F16_ACCUM", "0")
     ),
-    # Whether to use indexed gemm for humming moe
-    # if 1, force use indexed gemm
-    # if 0, force use grouped gemm
-    # if None, choose better gemm type automatically
+    # Which Humming MoE GEMM implementation to use.
+    # Valid values: indexed, grouped/grouped_contiguous, auto.
+    # If unset, choose the better GEMM type automatically.
     "VLLM_HUMMING_MOE_GEMM_TYPE": lambda: os.environ.get(
         "VLLM_HUMMING_MOE_GEMM_TYPE", None
     ),
