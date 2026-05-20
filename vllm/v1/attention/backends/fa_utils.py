@@ -18,17 +18,21 @@ _ROCM_FLASH_ATTN_AVAILABLE = False
 if current_platform.is_cuda():
     from vllm._custom_ops import reshape_and_cache_flash
 
-    # Try sgl_kernel FA3 first (faster kernel implementation)
+    # Try sgl_kernel FA3 first (faster kernel implementation).
+    # It currently ships Hopper kernels, so Blackwell should fall back to
+    # vllm_flash_attn where FA4/FA2 selection is handled below.
     _USE_SGL_KERNEL_FA = False
-    try:
-        from sgl_kernel.flash_attn import (  # noqa: F401
-            flash_attn_varlen_func as _sgl_flash_attn_varlen_func,
-        )
+    device_capability = current_platform.get_device_capability()
+    if device_capability is not None and device_capability.major == 9:
+        try:
+            from sgl_kernel.flash_attn import (  # noqa: F401
+                flash_attn_varlen_func as _sgl_flash_attn_varlen_func,
+            )
 
-        _USE_SGL_KERNEL_FA = True
-        logger.info("Using sgl_kernel FlashAttention (faster FA3)")
-    except ImportError:
-        pass
+            _USE_SGL_KERNEL_FA = True
+            logger.info("Using sgl_kernel FlashAttention (faster FA3)")
+        except ImportError:
+            pass
 
     if _USE_SGL_KERNEL_FA:
 

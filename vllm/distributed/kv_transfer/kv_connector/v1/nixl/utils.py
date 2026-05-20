@@ -4,13 +4,16 @@
 
 import contextlib
 from collections.abc import Iterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import zmq
 
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
@@ -55,3 +58,21 @@ def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
         inner = next(iter(spec.kv_cache_specs.values()))
         return type(inner)
     return type(spec)
+
+
+def get_nixl_target_kv_group_indices(
+    kv_cache_groups: list["KVCacheGroupSpec"],
+) -> tuple[int, ...]:
+    """Return KV cache group indices that NIXL should transfer.
+
+    Speculative decoding can add EAGLE/MTP draft KV groups to the same
+    ``KVCacheConfig`` used by the engine. NIXL transfers target-model KV
+    between prefill and decode; draft-model KV should remain local to the
+    decode-side drafter.
+    """
+    target_indices = tuple(
+        i for i, group in enumerate(kv_cache_groups) if not group.is_eagle_group
+    )
+    if target_indices:
+        return target_indices
+    return tuple(range(len(kv_cache_groups)))

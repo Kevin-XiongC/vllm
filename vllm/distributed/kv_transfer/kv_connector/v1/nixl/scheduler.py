@@ -27,7 +27,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlHandshakePayload,
     ReqId,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
+    get_nixl_target_kv_group_indices,
+    zmq_ctx,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -62,6 +65,12 @@ class NixlConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
+        self._nixl_kv_group_indices = get_nixl_target_kv_group_indices(
+            kv_cache_config.kv_cache_groups
+        )
+        self._nixl_kv_cache_groups = [
+            kv_cache_config.kv_cache_groups[i] for i in self._nixl_kv_group_indices
+        ]
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
@@ -86,12 +95,11 @@ class NixlConnectorScheduler:
             # Also handle unlikely SW-only model case instead of checking num_groups>1.
             and any(
                 not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in kv_cache_config.kv_cache_groups
+                for g in self._nixl_kv_cache_groups
             )
         )
         self._has_mamba = any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            for g in kv_cache_config.kv_cache_groups
+            isinstance(g.kv_cache_spec, MambaSpec) for g in self._nixl_kv_cache_groups
         )
 
         logger.info("Initializing NIXL Scheduler %s", engine_id)
@@ -127,7 +135,7 @@ class NixlConnectorScheduler:
             (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
-            for g in kv_cache_config.kv_cache_groups
+            for g in self._nixl_kv_cache_groups
         ]
         # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
         # account for boundary overlap eg window isn't fully aligned with blocks.
@@ -217,6 +225,16 @@ class NixlConnectorScheduler:
                     # Clean up empty engines so we don't leak a key when remote dies.
                     del self._heartbeat_by_engine[engine_id]
 
+    def _filter_nixl_block_ids(self, block_ids: BlockIds) -> BlockIds:
+        if len(block_ids) == 0:
+            return block_ids
+        if len(block_ids) == len(self._nixl_kv_cache_groups):
+            return block_ids
+        assert len(block_ids) == len(self.kv_cache_config.kv_cache_groups), (
+            "Number of KV cache groups must match"
+        )
+        return tuple(block_ids[i] for i in self._nixl_kv_group_indices)
+
     def get_sw_clipped_blocks(self, block_ids: BlockIds) -> BlockIds:
         """
         Clip the number of blocks to the sliding window size for each kv cache group
@@ -227,7 +245,8 @@ class NixlConnectorScheduler:
         """
         if len(block_ids) == 0 or not self._is_hma_required:
             # No blocks to clip eg Full prefix cache hit or not a hybrid model.
-            return block_ids
+            return self._filter_nixl_block_ids(block_ids)
+        block_ids = self._filter_nixl_block_ids(block_ids)
         # NOTE (NickLucche) This logic is currently handled at the connector level
         # because offloading connectors might want to receive the whole sequence even
         # for SWA groups. We will abstract this logic once the interface is more stable

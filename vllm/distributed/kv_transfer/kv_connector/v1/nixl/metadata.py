@@ -34,8 +34,10 @@ GET_META_MSG = b"get_meta_msg"
 #   2: Add remote_request_id to kv_transfer_params
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
+#   5: Restrict NIXL transfer metadata to target-model KV groups under spec decode
+#   6: Filter spec-draft KV caches by target KV geometry before NIXL registration
 #
-NIXL_CONNECTOR_VERSION: int = 4
+NIXL_CONNECTOR_VERSION: int = 6
 
 
 @dataclass

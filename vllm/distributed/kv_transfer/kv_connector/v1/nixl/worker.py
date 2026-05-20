@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import msgspec
 import numpy as np
+import regex as re
 import torch
 import zmq
 
@@ -52,6 +53,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
+    get_nixl_target_kv_group_indices,
     get_representative_spec_type,
     zmq_ctx,
 )
@@ -81,6 +83,8 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
+
+_MODEL_LAYER_PATTERN = re.compile(r"^model\.layers\.(\d+)(?:\.|$)")
 
 
 class NixlConnectorWorker:
@@ -222,17 +226,23 @@ class NixlConnectorWorker:
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
         self._lease_extension = kv_lease_duration * 2 // 3
 
+        self._nixl_kv_group_indices = get_nixl_target_kv_group_indices(
+            kv_cache_config.kv_cache_groups
+        )
+        self._nixl_kv_cache_groups = [
+            kv_cache_config.kv_cache_groups[i] for i in self._nixl_kv_group_indices
+        ]
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
                 not isinstance(g.kv_cache_spec, FullAttentionSpec)
-                for g in kv_cache_config.kv_cache_groups
+                for g in self._nixl_kv_cache_groups
             )
         )
         self.kv_cache_config = kv_cache_config
         self._layer_specs = {
             layer: group.kv_cache_spec
-            for group in kv_cache_config.kv_cache_groups
+            for group in self._nixl_kv_cache_groups
             for layer in group.layer_names
         }
         self.hma_group_size = len(kv_cache_config.kv_cache_tensors)
@@ -244,8 +254,7 @@ class NixlConnectorWorker:
         # that x/B/C sub-projections are contiguous in memory.
         self._conv_decomp: MambaConvSplitInfo | None = None
         self._has_mamba = any(
-            isinstance(g.kv_cache_spec, MambaSpec)
-            for g in kv_cache_config.kv_cache_groups
+            isinstance(g.kv_cache_spec, MambaSpec) for g in self._nixl_kv_cache_groups
         )
         if self._has_mamba:
             assert self._is_hma_required
@@ -441,7 +450,7 @@ class NixlConnectorWorker:
         # Unwrap UniformTypeKVCacheSpecs to get the representative spec type
         self._group_spec_types = tuple(
             get_representative_spec_type(g.kv_cache_spec)
-            for g in self.kv_cache_config.kv_cache_groups
+            for g in self._nixl_kv_cache_groups
         )
 
         # Per-engine TP mappings. Generated during handshake.
@@ -785,6 +794,51 @@ class NixlConnectorWorker:
         # Forwarding a real layer name rather than a synthetic key
         self.register_kv_caches({first_layer: kv_cache})
 
+    def _is_appended_draft_layer_name(self, name: str) -> bool:
+        if not self._uses_draft_model():
+            return False
+        match = _MODEL_LAYER_PATTERN.match(name)
+        if match is None:
+            return False
+        layer_idx = int(match.group(1))
+        target_num_hidden_layers = self._get_target_num_hidden_layers()
+        if target_num_hidden_layers is None:
+            return False
+        return layer_idx >= target_num_hidden_layers
+
+    @staticmethod
+    def _model_config_num_hidden_layers(model_config: Any) -> int | None:
+        if model_config is None:
+            return None
+        for hf_attr in ("hf_text_config", "hf_config"):
+            hf_config = getattr(model_config, hf_attr, None)
+            value = getattr(hf_config, "num_hidden_layers", None)
+            if isinstance(value, int) and value > 0:
+                return value
+        get_total = getattr(model_config, "get_total_num_hidden_layers", None)
+        if not callable(get_total):
+            return None
+        value = get_total()
+        if isinstance(value, int) and value > 0:
+            return value
+        return None
+
+    def _get_target_num_hidden_layers(self) -> int | None:
+        spec_config = getattr(self.vllm_config, "speculative_config", None)
+        target_model_config = getattr(spec_config, "target_model_config", None)
+        for model_config in (target_model_config, self.model_config):
+            num_hidden_layers = self._model_config_num_hidden_layers(model_config)
+            if num_hidden_layers is not None:
+                return num_hidden_layers
+        return None
+
+    def _uses_draft_model(self) -> bool:
+        if self.vllm_config is None:
+            return False
+        spec_config = getattr(self.vllm_config, "speculative_config", None)
+        uses_draft_model = getattr(spec_config, "uses_draft_model", None)
+        return callable(uses_draft_model) and uses_draft_model()
+
     def _filter_kv_caches_to_target_layers(
         self, kv_caches: dict[str, torch.Tensor]
     ) -> dict[str, torch.Tensor]:
@@ -797,10 +851,9 @@ class NixlConnectorWorker:
         layers in the descriptor list, broken per-stage routing under PP).
 
         Authoritative target set: ``self._layer_specs`` is built from
-        ``kv_cache_config.kv_cache_groups[*].layer_names`` (the engine
-        populates it scoped to the target model per PP rank). Membership
-        test is correct on every PP rank and under any draft-naming
-        convention (Eagle/MTP/etc.), with no integer-index arithmetic.
+        the NIXL-selected target KV groups. Membership test is correct on
+        every PP rank and under any draft-naming convention
+        (Eagle/MTP/etc.), with no integer-index arithmetic.
 
         Applied uniformly regardless of ``speculative_config`` so that an
         unexpected non-target key surfaces the same way in every code
@@ -811,26 +864,82 @@ class NixlConnectorWorker:
         """
         target_layer_names = set(self._layer_specs)
         filtered: dict[str, torch.Tensor] = {}
-        dropped: list[str] = []
+        dropped: list[tuple[str, str]] = []
         for name, cache in kv_caches.items():
-            if name in target_layer_names:
-                filtered[name] = cache
+            if name not in target_layer_names:
+                drop_reason = "not in target model's _layer_specs"
+            elif self._is_appended_draft_layer_name(name):
+                drop_reason = "appended speculative draft layer"
             else:
-                dropped.append(name)
-                logger.debug(
-                    "Skipping non-target KV cache layer %s from NIXL"
-                    " registration (not in target model's _layer_specs)",
-                    name,
-                )
+                filtered[name] = cache
+                continue
+
+            dropped.append((name, drop_reason))
+            logger.debug(
+                "Skipping KV cache layer %s from NIXL registration (%s)",
+                name,
+                drop_reason,
+            )
         if dropped:
             logger.info(
-                "NIXL registration skipped %d non-target KV cache layer(s)"
-                " (sample: %s). This is expected under speculative decoding"
-                " with a separate draft model; unexpected otherwise.",
+                "NIXL registration skipped %d KV cache layer(s)"
+                " (sample name/reason: %s). This is expected under"
+                " speculative decoding with a separate draft model;"
+                " unexpected otherwise.",
                 len(dropped),
                 dropped[:3],
             )
         return filtered
+
+    def _filter_kv_caches_to_target_geometry(
+        self, kv_caches: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        if not self._uses_draft_model():
+            return kv_caches
+
+        filtered: dict[str, torch.Tensor] = {}
+        dropped: list[tuple[str, tuple[int, ...]]] = []
+        assert self.transfer_topo is not None
+        for name, cache_or_caches in kv_caches.items():
+            layer_spec = self._layer_specs[name]
+            if isinstance(layer_spec, UniformTypeKVCacheSpecs):
+                layer_spec = layer_spec.kv_cache_specs[name]
+            if isinstance(layer_spec, MambaSpec):
+                expected_num_blocks = self._logical_num_blocks
+                candidate_caches = [cache_or_caches[0]]
+            else:
+                expected_num_blocks = self.num_blocks
+                candidate_caches = self.transfer_topo.get_transfer_cache_regions(
+                    cache_or_caches, layer_spec
+                )
+            candidate_list = (
+                list(candidate_caches)
+                if isinstance(candidate_caches, list)
+                or (
+                    isinstance(candidate_caches, torch.Tensor)
+                    and self.transfer_topo.split_k_and_v
+                )
+                else [candidate_caches]
+            )
+            if any(cache.shape[0] != expected_num_blocks for cache in candidate_list):
+                shape = getattr(cache_or_caches, "shape", None)
+                dropped.append((name, tuple(shape) if shape is not None else ()))
+                continue
+            filtered[name] = cache_or_caches
+
+        if dropped:
+            logger.info(
+                "NIXL registration skipped %d KV cache layer(s) whose"
+                " geometry does not match target cache blocks=%s under"
+                " speculative decoding (sample: %s)",
+                len(dropped),
+                self.num_blocks,
+                dropped[:3],
+            )
+        return filtered
+
+    def _num_cross_layer_slices(self) -> int:
+        return len(self.kv_cache_config.kv_cache_tensors)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
@@ -849,6 +958,7 @@ class NixlConnectorWorker:
             else None,
             is_mamba=self._has_mamba,
         )
+        kv_caches = self._filter_kv_caches_to_target_geometry(kv_caches)
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config, self.backend_name, self.transfer_topo.cross_layers_blocks
         )
@@ -917,9 +1027,7 @@ class NixlConnectorWorker:
             physical_page_size = physical_page_size // len(cache_list)
             if self.transfer_topo._cross_layers_blocks:
                 # When cross-layers blocks are used, multiply by number of layers
-                physical_page_size = physical_page_size * len(
-                    self.kv_cache_config.kv_cache_tensors
-                )
+                physical_page_size = physical_page_size * self._num_cross_layer_slices()
             num_blocks = (
                 self._logical_num_blocks
                 if isinstance(layer_spec, MambaSpec)
@@ -2235,7 +2343,7 @@ class NixlConnectorWorker:
         assert (
             len(remote_block_ids)
             == len(local_block_ids)
-            == len(self.kv_cache_config.kv_cache_groups)
+            == len(self._nixl_kv_cache_groups)
         )
         remote_physical_per_logical = remote_info.remote_physical_blocks_per_logical
         local_block_ids, remote_block_ids = self._apply_prefix_caching(
@@ -2325,7 +2433,7 @@ class NixlConnectorWorker:
             1, -1
         )
         # Mamba blocks have no logical<>physical discrepancy
-        group_specs = self.kv_cache_config.kv_cache_groups
+        group_specs = self._nixl_kv_cache_groups
         return [
             BlockTable.map_to_kernel_blocks(
                 np.array(group),
@@ -2417,7 +2525,7 @@ class NixlConnectorWorker:
         if remote_physical_per_logical == 1:
             return block_ids
         remote_arange = np.arange(remote_physical_per_logical).reshape(1, -1)
-        group_specs = self.kv_cache_config.kv_cache_groups
+        group_specs = self._nixl_kv_cache_groups
         result = [
             BlockTable.map_to_kernel_blocks(
                 np.array(group),
