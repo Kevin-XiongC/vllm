@@ -97,12 +97,35 @@ def _aiter_get_num_expert_group(num_experts: int) -> int:
     return g
 
 
+def _is_kimi_k2_moe_gate_fusion_enabled_by_config() -> bool:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return True
+    return vllm_config.compilation_config.pass_config.enable_kimi_k2_moe_gate_fusion
+
+
+def is_novita_kimi_k2_moe_gate_fusion_available() -> bool:
+    if not _is_kimi_k2_moe_gate_fusion_enabled_by_config():
+        return False
+
+    from vllm.novita_ops import is_novita_available
+
+    return is_novita_available()
+
+
 def should_use_novita_kimi_k2_moe_gate(
     gating_output: torch.Tensor,
     e_score_correction_bias: torch.Tensor,
     topk: int,
     scoring_func: str,
+    gate_fusion_available: bool | None = None,
 ) -> bool:
+    if gate_fusion_available is None:
+        gate_fusion_available = is_novita_kimi_k2_moe_gate_fusion_available()
+    if not gate_fusion_available:
+        return False
     if not current_platform.is_cuda():
         return False
     if scoring_func != "sigmoid":
@@ -113,24 +136,11 @@ def should_use_novita_kimi_k2_moe_gate(
         return False
     if e_score_correction_bias.dim() != 1 or e_score_correction_bias.shape[0] != 384:
         return False
-    if gating_output.dtype != torch.float32:
+    if gating_output.dtype not in (torch.float32, torch.bfloat16):
         return False
     if e_score_correction_bias.dtype != torch.float32:
         return False
-    if not gating_output.is_contiguous() or not e_score_correction_bias.is_contiguous():
-        return False
-
-    from vllm.config import get_current_vllm_config_or_none
-
-    vllm_config = get_current_vllm_config_or_none()
-    if vllm_config is None:
-        return False
-    if not vllm_config.compilation_config.pass_config.enable_kimi_k2_moe_gate_fusion:
-        return False
-
-    from vllm.novita_ops import is_novita_available
-
-    return is_novita_available()
+    return gating_output.is_contiguous() and e_score_correction_bias.is_contiguous()
 
 
 def novita_kimi_k2_moe_fused_gate(

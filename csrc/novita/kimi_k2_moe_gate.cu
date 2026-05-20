@@ -6,10 +6,12 @@
 
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAStream.h>
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <torch/all.h>
 
 #include <cfloat>
+#include <type_traits>
 
 namespace {
 
@@ -26,8 +28,18 @@ static constexpr int THREADS_PER_BLOCK_SMALL =
 static constexpr int VEC_SIZE = 4;
 static constexpr int MAX_TOPK = 8;
 
+template <typename T>
+__device__ __forceinline__ float to_float(T value) {
+  if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+    return __bfloat162float(value);
+  } else {
+    return static_cast<float>(value);
+  }
+}
+
+template <typename InputT>
 __global__ void kimi_k2_moe_fused_gate_kernel_small_token(
-    const float* input, const float* bias, float* output_ptr,
+    const InputT* input, const float* bias, float* output_ptr,
     int32_t* indices_ptr, int64_t num_rows, int64_t topk, bool renormalize,
     double routed_scaling_factor, bool apply_routed_scaling_factor_on_output) {
   int64_t row_idx = blockIdx.x;
@@ -46,7 +58,7 @@ __global__ void kimi_k2_moe_fused_gate_kernel_small_token(
   __shared__ int warp_experts[WARPS_PER_TOKEN_SMALL];
 
   if (tid < NUM_EXPERTS) {
-    float input_val = input[row_idx * NUM_EXPERTS + tid];
+    float input_val = to_float(input[row_idx * NUM_EXPERTS + tid]);
     float bias_val = bias[tid];
     float sigmoid_val = 1.0f / (1.0f + expf(-input_val));
     float biased_val = sigmoid_val + bias_val;
@@ -141,8 +153,9 @@ __global__ void kimi_k2_moe_fused_gate_kernel_small_token(
   }
 }
 
+template <typename InputT>
 __global__ void kimi_k2_moe_fused_gate_kernel(
-    const float* input, const float* bias, float* output_ptr,
+    const InputT* input, const float* bias, float* output_ptr,
     int32_t* indices_ptr, int64_t num_rows, int64_t topk, bool renormalize,
     double routed_scaling_factor, bool apply_routed_scaling_factor_on_output) {
   int64_t row_idx = blockIdx.x * WARPS_PER_CTA + threadIdx.y;
@@ -159,22 +172,33 @@ __global__ void kimi_k2_moe_fused_gate_kernel(
   float* warp_scores = shared_scores + warp_id * NUM_EXPERTS;
   float* warp_original_scores = shared_original_scores + warp_id * NUM_EXPERTS;
 
-  constexpr int VEC_PER_LANE = VPT / VEC_SIZE;
-  const float4* input_vec =
-      reinterpret_cast<const float4*>(input + row_idx * NUM_EXPERTS);
-  const float4* bias_vec = reinterpret_cast<const float4*>(bias);
+  if constexpr (std::is_same_v<InputT, float>) {
+    constexpr int VEC_PER_LANE = VPT / VEC_SIZE;
+    const float4* input_vec =
+        reinterpret_cast<const float4*>(input + row_idx * NUM_EXPERTS);
+    const float4* bias_vec = reinterpret_cast<const float4*>(bias);
 
 #pragma unroll
-  for (int i = 0; i < VEC_PER_LANE; i++) {
-    int vec_idx = lane_id * VEC_PER_LANE + i;
-    float4 input_val = input_vec[vec_idx];
-    float4 bias_val = bias_vec[vec_idx];
+    for (int i = 0; i < VEC_PER_LANE; i++) {
+      int vec_idx = lane_id * VEC_PER_LANE + i;
+      float4 input_val = input_vec[vec_idx];
+      float4 bias_val = bias_vec[vec_idx];
 
 #pragma unroll
-    for (int j = 0; j < VEC_SIZE; j++) {
-      int expert = vec_idx * VEC_SIZE + j;
-      float inp = reinterpret_cast<float*>(&input_val)[j];
-      float b = reinterpret_cast<float*>(&bias_val)[j];
+      for (int j = 0; j < VEC_SIZE; j++) {
+        int expert = vec_idx * VEC_SIZE + j;
+        float inp = reinterpret_cast<float*>(&input_val)[j];
+        float b = reinterpret_cast<float*>(&bias_val)[j];
+        float sigmoid_val = 1.0f / (1.0f + expf(-inp));
+        warp_scores[expert] = sigmoid_val + b;
+        warp_original_scores[expert] = sigmoid_val;
+      }
+    }
+  } else {
+#pragma unroll
+    for (int expert = lane_id; expert < NUM_EXPERTS; expert += WARP_SIZE) {
+      float inp = to_float(input[row_idx * NUM_EXPERTS + expert]);
+      float b = bias[expert];
       float sigmoid_val = 1.0f / (1.0f + expf(-inp));
       warp_scores[expert] = sigmoid_val + b;
       warp_original_scores[expert] = sigmoid_val;
@@ -240,6 +264,30 @@ __global__ void kimi_k2_moe_fused_gate_kernel(
 
 }  // namespace
 
+template <typename InputT>
+void launch_kimi_k2_moe_fused_gate(const InputT* input_ptr,
+                                   const float* bias_ptr, float* output_ptr,
+                                   int32_t* indices_ptr, int64_t num_rows,
+                                   int64_t topk, bool renormalize,
+                                   double routed_scaling_factor,
+                                   bool apply_routed_scaling_factor_on_output,
+                                   cudaStream_t stream) {
+  if (num_rows <= SMALL_TOKEN_THRESHOLD) {
+    kimi_k2_moe_fused_gate_kernel_small_token<<<
+        num_rows, THREADS_PER_BLOCK_SMALL, 0, stream>>>(
+        input_ptr, bias_ptr, output_ptr, indices_ptr, num_rows, topk,
+        renormalize, routed_scaling_factor,
+        apply_routed_scaling_factor_on_output);
+  } else {
+    int64_t num_blocks = (num_rows + WARPS_PER_CTA - 1) / WARPS_PER_CTA;
+    dim3 block_dim(WARP_SIZE, WARPS_PER_CTA);
+    kimi_k2_moe_fused_gate_kernel<<<num_blocks, block_dim, 0, stream>>>(
+        input_ptr, bias_ptr, output_ptr, indices_ptr, num_rows, topk,
+        renormalize, routed_scaling_factor,
+        apply_routed_scaling_factor_on_output);
+  }
+}
+
 std::tuple<torch::Tensor, torch::Tensor> kimi_k2_moe_fused_gate(
     const torch::Tensor& input, const torch::Tensor& bias, int64_t topk,
     bool renormalize, double routed_scaling_factor,
@@ -250,7 +298,9 @@ std::tuple<torch::Tensor, torch::Tensor> kimi_k2_moe_fused_gate(
   TORCH_CHECK(bias.is_contiguous(), "bias must be contiguous");
   TORCH_CHECK(input.dim() == 2, "input must be a 2D tensor");
   TORCH_CHECK(bias.dim() == 1, "bias must be a 1D tensor");
-  TORCH_CHECK(input.scalar_type() == at::kFloat, "input must be float32");
+  TORCH_CHECK(
+      input.scalar_type() == at::kFloat || input.scalar_type() == at::kBFloat16,
+      "input must be float32 or bfloat16");
   TORCH_CHECK(bias.scalar_type() == at::kFloat, "bias must be float32");
   TORCH_CHECK(topk > 0 && topk <= MAX_TOPK,
               "kimi_k2_moe_fused_gate only supports 1 <= topk <= ", MAX_TOPK,
@@ -264,27 +314,25 @@ std::tuple<torch::Tensor, torch::Tensor> kimi_k2_moe_fused_gate(
   TORCH_CHECK(bias.numel() == NUM_EXPERTS, "bias must contain ", NUM_EXPERTS,
               " elements");
 
-  auto output = torch::empty({num_rows, topk}, input.options());
+  auto output =
+      torch::empty({num_rows, topk}, input.options().dtype(torch::kFloat32));
   auto indices =
       torch::empty({num_rows, topk}, input.options().dtype(torch::kInt32));
 
   auto stream = c10::cuda::getCurrentCUDAStream(input.get_device()).stream();
 
-  if (num_rows <= SMALL_TOKEN_THRESHOLD) {
-    kimi_k2_moe_fused_gate_kernel_small_token<<<
-        num_rows, THREADS_PER_BLOCK_SMALL, 0, stream>>>(
+  if (input.scalar_type() == at::kFloat) {
+    launch_kimi_k2_moe_fused_gate(
         input.data_ptr<float>(), bias.data_ptr<float>(),
         output.data_ptr<float>(), indices.data_ptr<int32_t>(), num_rows, topk,
         renormalize, routed_scaling_factor,
-        apply_routed_scaling_factor_on_output);
+        apply_routed_scaling_factor_on_output, stream);
   } else {
-    int64_t num_blocks = (num_rows + WARPS_PER_CTA - 1) / WARPS_PER_CTA;
-    dim3 block_dim(WARP_SIZE, WARPS_PER_CTA);
-    kimi_k2_moe_fused_gate_kernel<<<num_blocks, block_dim, 0, stream>>>(
-        input.data_ptr<float>(), bias.data_ptr<float>(),
-        output.data_ptr<float>(), indices.data_ptr<int32_t>(), num_rows, topk,
-        renormalize, routed_scaling_factor,
-        apply_routed_scaling_factor_on_output);
+    launch_kimi_k2_moe_fused_gate(
+        reinterpret_cast<__nv_bfloat16 const*>(input.data_ptr()),
+        bias.data_ptr<float>(), output.data_ptr<float>(),
+        indices.data_ptr<int32_t>(), num_rows, topk, renormalize,
+        routed_scaling_factor, apply_routed_scaling_factor_on_output, stream);
   }
 
   C10_CUDA_KERNEL_LAUNCH_CHECK();

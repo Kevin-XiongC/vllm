@@ -180,6 +180,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        # FlashInfer two-sided MoE A2A is not wired up for humming yet.
+        # FlashInfer one-sided is supported by the Standard-format subclasses
+        # (HummingIndexedExperts, HummingGroupedExperts) and overridden there;
+        # BatchedHummingGroupedExperts keeps the default which blocks both.
         return not (
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
@@ -448,6 +452,12 @@ class HummingIndexedExperts(HummingExpertsBase):
     def humming_gemm_type() -> HummingGemmType:
         return HummingGemmType.INDEXED
 
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        # Standard-format routed-payload experts are compatible with the
+        # FlashInfer one-sided MoE A2A backend; two-sided is still unsupported.
+        return not moe_parallel_config.use_fi_nvl_two_sided_kernels
+
     def prepare_humming_moe_kwargs(
         self,
         topk_ids: torch.Tensor,
@@ -569,6 +579,12 @@ class HummingGroupedExperts(HummingExpertsBase):
     @staticmethod
     def humming_gemm_type() -> HummingGemmType:
         return HummingGemmType.GROUPED_CONTIGUOUS
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        # Standard-format routed-payload experts are compatible with the
+        # FlashInfer one-sided MoE A2A backend; two-sided is still unsupported.
+        return not moe_parallel_config.use_fi_nvl_two_sided_kernels
 
     def main_apply(
         self,

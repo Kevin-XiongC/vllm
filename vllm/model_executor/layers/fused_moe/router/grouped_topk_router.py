@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
+    is_novita_kimi_k2_moe_gate_fusion_available,
     novita_kimi_k2_moe_fused_gate,
     should_use_novita_kimi_k2_moe_gate,
 )
@@ -276,6 +277,11 @@ class GroupedTopKRouter(BaseRouter):
         self.routed_scaling_factor = routed_scaling_factor
         self.e_score_correction_bias = e_score_correction_bias
         self.num_fused_shared_experts = num_fused_shared_experts
+        self.novita_kimi_k2_moe_gate_fusion_available = False
+        if e_score_correction_bias is not None:
+            self.novita_kimi_k2_moe_gate_fusion_available = (
+                is_novita_kimi_k2_moe_gate_fusion_available()
+            )
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -335,6 +341,7 @@ class GroupedTopKRouter(BaseRouter):
                 self.e_score_correction_bias,
                 self.top_k,
                 self.scoring_func,
+                self.novita_kimi_k2_moe_gate_fusion_available,
             )
         ):
             return novita_kimi_k2_moe_fused_gate(
